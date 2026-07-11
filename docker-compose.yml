@@ -1,0 +1,120 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: booking
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d booking"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  catalog:
+    build: ./services/catalog
+    environment:
+      PORT: 4001
+      MONGO_URL: mongodb://mongo:27017/catalog
+    ports:
+      - "4001:4001"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  booking:
+    build: ./services/booking
+    environment:
+      PORT: 4002
+      DATABASE_URL: postgres://dev:dev@postgres:5432/booking
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://rabbitmq:5672
+    ports:
+      - "4002:4002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  payment:
+    build: ./services/payment
+    environment:
+      PORT: 4003
+      DATABASE_URL: postgres://dev:dev@postgres:5432/payment
+    ports:
+      - "4003:4003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  notifications:
+    build: ./services/notifications
+    environment:
+      PORT: 4004
+      RABBITMQ_URL: amqp://rabbitmq:5672
+    ports:
+      - "4004:4004"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    environment:
+      PORT: 8080
+      CATALOG_URL: http://catalog:4001
+      BOOKING_URL: http://booking:4002
+      PAYMENT_URL: http://payment:4003
+      NOTIFICATIONS_URL: http://notifications:4004
+    ports:
+      - "8080:8080"
+    depends_on:
+      - catalog
+      - booking
+      - payment
+      - notifications
+
+volumes:
+  mongo-data:
+  postgres-data:
