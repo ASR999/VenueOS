@@ -67,6 +67,7 @@ services:
       DATABASE_URL: postgres://dev:dev@postgres:5432/booking
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://rabbitmq:5672
+      GATEWAY_URL: http://gateway:8080
     ports:
       - "4002:4002"
     depends_on:

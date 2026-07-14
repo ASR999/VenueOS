@@ -9,6 +9,8 @@ app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
+const ah = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -16,6 +18,71 @@ app.get('/health', async (req, res) => {
   } catch {
     res.status(503).json({ service: 'payment', status: 'degraded', postgres: 'down' });
   }
+});
+
+// Mock payment processor. Idempotent: replaying a request with a known
+// idempotency_key returns the original result — never a second charge.
+// Callers use their bookingId as the key. Pass simulate: "fail" to test
+// the failure path.
+app.post(
+  '/payments',
+  ah(async (req, res) => {
+    const { bookingId, amountCents, idempotencyKey, simulate } = req.body || {};
+    if (!bookingId || !idempotencyKey || !Number.isInteger(amountCents) || amountCents <= 0) {
+      return res
+        .status(400)
+        .json({ error: 'bookingId, idempotencyKey and positive integer amountCents are required' });
+    }
+
+    const status = simulate === 'fail' ? 'failed' : 'succeeded';
+
+    // ON CONFLICT DO NOTHING + fallback SELECT makes concurrent replays safe:
+    // exactly one insert wins, everyone reads the same stored outcome.
+    const inserted = await pool.query(
+      `INSERT INTO payments (idempotency_key, booking_id, amount_cents, status)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id, status`,
+      [idempotencyKey, bookingId, amountCents, status]
+    );
+    if (inserted.rowCount === 1) {
+      const p = inserted.rows[0];
+      return res.status(201).json({ paymentId: p.id, status: p.status, replay: false });
+    }
+
+    const existing = await pool.query(
+      'SELECT id, status, booking_id, amount_cents FROM payments WHERE idempotency_key = $1',
+      [idempotencyKey]
+    );
+    const p = existing.rows[0];
+    // Stripe-style: a key replay must be the SAME request. Reuse with a
+    // different payload is a caller bug — surface it, never mask it.
+    if (p.booking_id !== bookingId || p.amount_cents !== amountCents) {
+      return res
+        .status(409)
+        .json({ error: 'idempotency key reused with a different bookingId or amount' });
+    }
+    res.status(200).json({ paymentId: p.id, status: p.status, replay: true });
+  })
+);
+
+// Lookup by idempotency key — lets the booking sweep reconcile unknown
+// payment outcomes (see DESIGN.md "The reconciling sweep").
+app.get(
+  '/payments/key/:idempotencyKey',
+  ah(async (req, res) => {
+    const r = await pool.query(
+      'SELECT id, status FROM payments WHERE idempotency_key = $1',
+      [req.params.idempotencyKey]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'no payment for this key' });
+    res.json({ paymentId: r.rows[0].id, status: r.rows[0].status });
+  })
+);
+
+app.use((err, req, res, next) => {
+  console.error('payment: unhandled error:', err.message);
+  res.status(500).json({ error: 'internal error' });
 });
 
 async function start() {

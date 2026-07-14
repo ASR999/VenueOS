@@ -18,7 +18,7 @@ async function main() {
   for (let r = 0; r < rowCount; r++) {
     const rowLabel = String.fromCharCode(65 + r); // A, B, C…
     for (let n = 1; n <= perRow; n++) {
-      const priceCents = 5000 - r * 500; // front rows cost more
+      const priceCents = Math.max(500, 5000 - r * 500); // front rows cost more, floor $5
       const result = await pool.query(
         `INSERT INTO seats (event_id, label, price_cents)
          VALUES ($1, $2, $3)

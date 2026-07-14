@@ -37,8 +37,22 @@ async function start() {
 
   channel.consume(QUEUE, (msg) => {
     if (!msg) return;
-    // Phase 1 turns this into a real (mock) email send with idempotency.
-    console.log('notifications: booking.confirmed received:', msg.content.toString());
+    // Mock email send. Consumer-side idempotency (dedupe on bookingId) is
+    // formalized in Phase 3.
+    let data = null;
+    try {
+      data = JSON.parse(msg.content.toString());
+    } catch {
+      /* fall through to raw log */
+    }
+    if (data && data.bookingId) {
+      console.log(
+        `notifications: [mock email] to ${data.userId}: seat ${data.seatLabel} confirmed, ` +
+          `booking ${data.bookingId} ($${(data.priceCents / 100).toFixed(2)})`
+      );
+    } else {
+      console.log('notifications: unrecognized message:', msg.content.toString());
+    }
     channel.ack(msg);
   });
 }

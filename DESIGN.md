@@ -76,7 +76,10 @@ CREATE TABLE payments (
 ```
 
 Replaying a request with a known `idempotency_key` returns the stored result —
-no double charge, ever. (Mock: request may pass `simulate: "fail"`.)
+no double charge, ever. Reusing a key with a *different* `booking_id` or
+`amount_cents` is rejected with `409` (Stripe-style). Payments are queryable
+by key (`GET /payments/key/:idempotencyKey`) so the booking sweep can
+reconcile unknown outcomes. (Mock: request may pass `simulate: "fail"`.)
 
 ## Flows
 
@@ -93,9 +96,29 @@ no double charge, ever. (Mock: request may pass `simulate: "fail"`.)
    **The pending row is inserted *before* payment** — from this moment the
    constraint protects the seat even if the Redis hold expires mid-payment.
 3. Call payment service (HTTP via gateway) with `idempotencyKey = bookingId`.
-4. Payment succeeded → `UPDATE status='confirmed'`, publish
-   `booking.confirmed` to RabbitMQ, `DEL` the hold → `201`.
-   Payment failed → `UPDATE status='cancelled'`, `DEL` hold → `402`.
+4. Settle. Payment outcomes are **three-valued** — succeeded, rejected, or
+   *unknown* (timeout/network error, where the charge may exist server-side):
+   - succeeded → `UPDATE status='confirmed'` (guarded `AND status='pending'`),
+     publish `booking.confirmed`, `DEL` hold → `201`.
+   - failed/rejected (payment service answered — definitely no charge) →
+     `UPDATE status='cancelled'`, `DEL` hold → `402`/`502`.
+   - unknown → booking **stays pending**, `502` to the caller; the reconciling
+     sweep (below) resolves it. Never assume a timeout means "not charged."
+
+All pending→terminal transitions are guarded with `AND status='pending'`, so
+a booking the sweep already resolved can never be overridden or resurrected.
+
+### The reconciling sweep
+
+Every `SWEEP_INTERVAL_MS`, expired pending bookings are resolved against the
+payment service (lookup by `idempotencyKey = bookingId`):
+
+- payment `succeeded` → booking **confirmed** (recovered), event published.
+- payment `failed` or not found → booking cancelled, seat freed.
+- payment service unreachable → left pending; retried next cycle.
+
+The payment outcome — not the timer — decides. A paid booking is never
+cancelled by the sweep.
 
 ### Availability — `GET /events/:eventId/seats`
 
@@ -108,8 +131,10 @@ Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 | --- | --- |
 | Two users hold same seat same ms | Redis `NX` is atomic — exactly one wins. |
 | Hold expires during payment | Pending row already exists; constraint blocks rivals. |
-| Payment succeeds, confirm-update crashes | Booking stays `pending` with a `payment_id`; recovery sweep re-checks payment status. Accepted Phase 1 gap; outbox pattern fixes it properly in Phase 3. |
-| User abandons payment | Pending booking passes `expires_at`; sweep in booking service cancels stale pendings, freeing the seat. |
+| Payment succeeds, confirm-update crashes | Booking stays `pending`; the reconciling sweep queries payment by idempotency key (= bookingId), finds `succeeded`, and **confirms** it — the user keeps the seat they paid for. |
+| Payment call times out (outcome unknown) | Booking stays `pending`, caller gets `502`; sweep reconciles: confirm if charged, cancel if not. No cancel-on-timeout, so no double charge on retry. |
+| User abandons payment | Pending booking passes `expires_at`; sweep finds no payment for the key and cancels, freeing the seat. |
+| RabbitMQ down at publish | Event is lost (logged loudly); the connection retries forever so the window is brief. Accepted Phase 1 gap — the outbox pattern (Phase 3) makes publishes atomic with the booking write. |
 | Redis restarts (holds lost) | Multiple users may *believe* they hold; constraint picks one winner at insert. Overselling of holds possible, of bookings impossible. |
 | Redis down | Hold creation returns 503 (fail closed). Existing pending bookings unaffected. |
 | Double-publish / consumer replay | Notifications consumer must be idempotent (dedupe on bookingId). Formalized in Phase 3. |
