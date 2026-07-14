@@ -24,6 +24,11 @@ Gateway routes `/api/<service>/*` → service. Notifications has no public route
   is HTTP via the gateway or RabbitMQ events — nothing else.
 - Booking correctness beats everything: no code path may allow double-booking
   a seat. Locking strategy decisions get recorded here when made.
+- **Locking strategy (decided 2026-07-14):** Redis seat holds (`SET NX EX`)
+  as the speed layer + a partial unique index on active bookings in Postgres
+  as the source of truth. Pending bookings are inserted *before* payment so
+  the constraint protects the seat even if the hold expires. Full rationale
+  and failure-edge table in DESIGN.md — read it before touching booking code.
 - Postgres is deliberate for booking/payment (row locking, constraints,
   transactions); MongoDB is deliberate for catalog. Don't "simplify" to one DB.
 

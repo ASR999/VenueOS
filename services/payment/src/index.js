@@ -1,5 +1,6 @@
 const express = require('express');
 const { Pool } = require('pg');
+const migrate = require('./migrate');
 
 const PORT = process.env.PORT || 4003;
 
@@ -17,4 +18,12 @@ app.get('/health', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`payment service listening on :${PORT}`));
+async function start() {
+  await migrate(pool);
+  app.listen(PORT, () => console.log(`payment service listening on :${PORT}`));
+}
+
+start().catch((err) => {
+  console.error('payment failed to start:', err);
+  process.exit(1);
+});

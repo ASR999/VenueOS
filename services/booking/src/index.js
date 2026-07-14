@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const { createClient } = require('redis');
 const amqp = require('amqplib');
+const migrate = require('./migrate');
 
 const PORT = process.env.PORT || 4002;
 const QUEUE = 'booking.confirmed';
@@ -57,6 +58,7 @@ async function connectQueue(attempts = 10) {
 }
 
 async function start() {
+  await migrate(pool);
   await redis.connect();
   connectQueue();
   app.listen(PORT, () => console.log(`booking service listening on :${PORT}`));
