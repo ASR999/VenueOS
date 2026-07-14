@@ -41,7 +41,9 @@ cd client && npm install && npm run dev   # React app on :5173
 
 - Aggregate health: http://localhost:8080/health
 - RabbitMQ management UI: http://localhost:15672 (guest/guest)
-- Seed seats: `docker compose exec booking node scripts/seed.js <eventId>`
+- Demo data: create an event (`POST /api/catalog/events` with `{name, venue,
+  startsAt}`), then seed its seats with the returned `_id`:
+  `docker compose exec booking node scripts/seed.js <eventId>`
 - Demo the full flow: `POST /api/booking/holds` then `POST /api/booking/bookings`
   (body: eventId, seatId, userId), then `docker compose logs notifications`
   for the mock confirmation email. `simulatePaymentFailure: true` in the
