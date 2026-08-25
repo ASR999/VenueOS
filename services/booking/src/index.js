@@ -14,6 +14,9 @@ const SWEEP_INTERVAL_MS = parseInt(process.env.SWEEP_INTERVAL_MS || '60000', 10)
 // arrives as a client-side abort instead of the 5xx it really is.
 const PAYMENT_TIMEOUT_MS = parseInt(process.env.PAYMENT_TIMEOUT_MS || '5000', 10);
 const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS || '3000', 10);
+// Must stay under Docker's stop timeout (10s by default) or the container is
+// SIGKILLed mid-drain and the whole exercise is pointless.
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -21,10 +24,17 @@ const app = express();
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const redis = createClient({ url: process.env.REDIS_URL });
+// disableOfflineQueue: with the default queue, commands issued while Redis is
+// unreachable are held until it returns, so a hold request hangs indefinitely
+// instead of failing. Fail fast, then fail closed (503) - see redisCall.
+const redis = createClient({ url: process.env.REDIS_URL, disableOfflineQueue: true });
 redis.on('error', (err) => console.error('booking: redis error:', err.message));
 
 let channel = null;
+let connection = null;
+let server = null;
+let sweepTimer = null;
+let shuttingDown = false;
 
 const holdKey = (eventId, seatId) => `hold:${eventId}:${seatId}`;
 
@@ -46,6 +56,21 @@ function validateIds(body) {
   return null;
 }
 
+// Redis being unreachable is a dependency outage (503), not a bug (500), and it
+// must never be mistaken for "no hold exists" - that would let a second user
+// book a seat someone is holding. Every request-path Redis call goes through
+// here so the failure is uniform and fails closed.
+async function redisCall(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    const wrapped = new Error(`redis unavailable: ${err.message}`);
+    wrapped.status = 503;
+    wrapped.publicMessage = 'seat holds are temporarily unavailable';
+    throw wrapped;
+  }
+}
+
 // Atomic check-and-delete: only the hold's owner may release it. GET-then-DEL
 // would race (hold expires, someone else claims, we delete *their* hold).
 const RELEASE_SCRIPT = `
@@ -63,7 +88,10 @@ app.get('/health', async (req, res) => {
   } catch {
     /* stays down */
   }
-  if (redis.isOpen) health.redis = 'ok';
+  // isReady, not isOpen: isOpen stays true while the client is merely *trying*
+  // to reconnect, so health would report ok for a Redis that rejects every
+  // command.
+  if (redis.isReady) health.redis = 'ok';
   if (channel) health.rabbitmq = 'ok';
   if (health.postgres !== 'ok' || health.redis !== 'ok' || health.rabbitmq !== 'ok') {
     health.status = 'degraded';
@@ -89,10 +117,9 @@ app.post(
     );
     if (booked.rowCount > 0) return res.status(409).json({ error: 'seat already booked' });
 
-    const claimed = await redis.set(holdKey(eventId, seatId), userId, {
-      NX: true,
-      EX: HOLD_TTL_SECONDS,
-    });
+    const claimed = await redisCall(() =>
+      redis.set(holdKey(eventId, seatId), userId, { NX: true, EX: HOLD_TTL_SECONDS })
+    );
     if (claimed === 'OK') {
       return res.status(201).json({
         seatId,
@@ -103,9 +130,9 @@ app.post(
 
     // NX lost: someone holds it. If it's this same user, report their existing
     // hold instead of failing (double-click safe).
-    const holder = await redis.get(holdKey(eventId, seatId));
+    const holder = await redisCall(() => redis.get(holdKey(eventId, seatId)));
     if (holder === userId) {
-      const ttl = await redis.ttl(holdKey(eventId, seatId));
+      const ttl = await redisCall(() => redis.ttl(holdKey(eventId, seatId)));
       return res.status(200).json({
         seatId,
         userId,
@@ -125,10 +152,12 @@ app.delete(
     const { eventId, seatId, userId } = req.body;
 
     const key = holdKey(eventId, seatId);
-    const released = await redis.eval(RELEASE_SCRIPT, { keys: [key], arguments: [userId] });
+    const released = await redisCall(() =>
+      redis.eval(RELEASE_SCRIPT, { keys: [key], arguments: [userId] })
+    );
     if (released === 1) return res.status(204).end();
 
-    const holder = await redis.get(key);
+    const holder = await redisCall(() => redis.get(key));
     if (!holder) return res.status(404).json({ error: 'no hold on this seat' });
     return res.status(403).json({ error: 'hold owned by another user' });
   })
@@ -149,7 +178,7 @@ app.get(
     );
     if (rows.length === 0) return res.json({ eventId, seats: [] });
 
-    const holds = await redis.mGet(rows.map((r) => holdKey(eventId, r.id)));
+    const holds = await redisCall(() => redis.mGet(rows.map((r) => holdKey(eventId, r.id))));
     res.json({
       eventId,
       seats: rows.map((r, i) => ({
@@ -175,7 +204,7 @@ app.post(
     const { eventId, seatId, userId, simulatePaymentFailure } = req.body;
 
     // 1) Only the hold owner may book.
-    const holder = await redis.get(holdKey(eventId, seatId));
+    const holder = await redisCall(() => redis.get(holdKey(eventId, seatId)));
     if (holder !== userId) {
       return res.status(409).json({ error: 'you must hold the seat before booking' });
     }
@@ -296,8 +325,9 @@ app.get(
 );
 
 app.use((err, req, res, next) => {
-  console.error('booking: unhandled error:', err.message);
-  res.status(500).json({ error: 'internal error' });
+  const status = err.status || 500;
+  console.error(`booking: ${status === 500 ? 'unhandled error' : 'request failed'}:`, err.message);
+  res.status(status).json({ error: err.publicMessage || 'internal error' });
 });
 
 // Every pending→terminal transition goes through here. The status guard makes
@@ -343,6 +373,7 @@ async function sweepExpiredPendings() {
      LIMIT 100`
   );
   for (const b of rows) {
+    if (shuttingDown) return;
     let payment = null; // null = definitively no charge for this key
     try {
       const resp = await fetch(`${GATEWAY_URL}/api/payment/payments/key/${b.id}`, {
@@ -374,7 +405,7 @@ async function sweepExpiredPendings() {
 }
 
 function startSweep() {
-  setInterval(
+  sweepTimer = setInterval(
     () => sweepExpiredPendings().catch((err) => console.error('booking: sweep error:', err.message)),
     SWEEP_INTERVAL_MS
   );
@@ -384,6 +415,7 @@ function startSweep() {
 // down, so abandoning reconnection would silently drop every future event.
 async function connectQueue() {
   for (let attempt = 1; ; attempt++) {
+    if (shuttingDown) return;
     let conn = null;
     try {
       conn = await amqp.connect(process.env.RABBITMQ_URL);
@@ -398,12 +430,14 @@ async function connectQueue() {
       // this loop, and must not also spawn a second loop from here.
       conn.on('close', () => {
         channel = null;
+        if (shuttingDown) return; // we closed it on purpose
         console.error('booking: RabbitMQ connection closed — reconnecting');
         setTimeout(connectQueue, RECONNECT_DELAY_MS);
       });
 
       // Published to only after assertQueue, so /health never reports 'ok' for
       // a channel that cannot yet accept a booking.confirmed.
+      connection = conn;
       channel = ch;
       console.log('booking: connected to RabbitMQ');
       return;
@@ -424,8 +458,42 @@ async function start() {
   await redis.connect();
   connectQueue();
   startSweep();
-  app.listen(PORT, () => console.log(`booking service listening on :${PORT}`));
+  server = app.listen(PORT, () => console.log(`booking service listening on :${PORT}`));
 }
+
+// Drain in order: stop scheduling sweeps, stop accepting requests and let
+// in-flight bookings finish, then release the connections. Cutting a booking
+// off mid-payment leaves it pending for the sweep to reconcile — correct, but
+// there is no reason to create the work.
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`booking: ${signal} received — draining`);
+
+  // Backstop, so a wedged connection can't hold the container past Docker's
+  // SIGKILL deadline. unref'd: it must not itself keep the process alive.
+  setTimeout(() => {
+    console.error('booking: drain timed out — exiting anyway');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+
+  clearInterval(sweepTimer);
+  if (server) {
+    const closed = new Promise((resolve) => server.close(resolve));
+    server.closeIdleConnections(); // keep-alive sockets would otherwise stall close()
+    await closed;
+  }
+  await Promise.allSettled([
+    connection && connection.close(),
+    redis.isOpen && redis.quit(),
+    pool.end(),
+  ]);
+  console.log('booking: drained');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch((err) => {
   console.error('booking failed to start:', err);

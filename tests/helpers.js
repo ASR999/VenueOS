@@ -103,6 +103,16 @@ function containerStartedAt(service) {
   }).trim();
 }
 
+// 0 means the process drained and exited on its own. 143 is SIGTERM with no
+// handler; 137 is SIGKILL after Docker's stop timeout ran out.
+function exitCode(service) {
+  const id = compose('ps', '-qa', service).trim();
+  return parseInt(
+    execFileSync('docker', ['inspect', '-f', '{{.State.ExitCode}}', id], { encoding: 'utf8' }).trim(),
+    10
+  );
+}
+
 function restartPolicy(service) {
   const id = compose('ps', '-qa', service).trim();
   return execFileSync('docker', ['inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', id], {
@@ -138,5 +148,6 @@ module.exports = {
   notificationsLogCount,
   containerStartedAt,
   restartPolicy,
+  exitCode,
   serviceHealth,
 };

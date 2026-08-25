@@ -69,6 +69,13 @@ cd client && npm install && npm run dev   # React app on :5173
   mid-setup is retried by the loop and not by a second competing one.
 - Images build with `npm ci` from a committed `package-lock.json`; every service
   and the gateway has one.
+- Every service handles SIGTERM/SIGINT: stop accepting requests, let in-flight
+  ones finish, then close pg/Redis/AMQP. This is not optional in Docker - Node
+  runs as PID 1, and the kernel does not deliver SIGTERM to PID 1 unless a
+  handler is registered, so a service without one is SIGKILLed (exit 137) and
+  drains nothing. Keep `SHUTDOWN_TIMEOUT_MS` under Docker's stop timeout.
+- `GET /health` returns 503, not 200, when the service is degraded - including
+  the gateway's aggregate, which is 200 only when every dependency is ok.
 - One Postgres container, but separate databases per service (`booking`,
   `payment`) — created in `infra/postgres/init.sql`. Schema/migrations live
   with the owning service (tooling comes in Phase 1).

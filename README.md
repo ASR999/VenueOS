@@ -39,5 +39,6 @@ No dependencies to install - `node:test` and `fetch` are built in.
 | `tests/payment.test.js` | Rejected payments free the seat; idempotency keys can't be charged twice. |
 | `tests/recovery.test.js` | Ambiguous payment outcomes stay pending, and the sweep confirms or cancels them from the payment record. Stops the payment container, so tests run serially. |
 | `tests/resilience.test.js` | Services survive their dependencies restarting: notifications reports degraded during a broker outage and reconnects in-process. Restarts shared containers. |
+| `tests/shutdown.test.js` | Every service drains on SIGTERM (exit 0, not 137), the aggregate health endpoint returns 503 when a dependency is down, and a Redis outage fails holds fast and closed. Stops the whole app tier. |
 
 See [CLAUDE.md](./CLAUDE.md) for architecture, conventions, and the roadmap.

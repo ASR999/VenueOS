@@ -143,7 +143,8 @@ Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 | User abandons payment | Pending booking passes `expires_at`; sweep finds no payment for the key and cancels, freeing the seat. |
 | RabbitMQ down at publish | Event is lost (logged loudly); the connection retries forever so the window is brief. Accepted Phase 1 gap — the outbox pattern (Phase 3) makes publishes atomic with the booking write. |
 | Redis restarts (holds lost) | Multiple users may *believe* they hold; constraint picks one winner at insert. Overselling of holds possible, of bookings impossible. |
-| Redis down | Hold creation returns 503 (fail closed). Existing pending bookings unaffected. |
+| Redis down | Every hold/seat-map/booking request returns 503 (fail closed) and returns it *fast*. Existing pending bookings unaffected. Corrected 2026-08-25: this table said 503 but the request actually hung forever, because node-redis queues commands while disconnected - the client now sets `disableOfflineQueue`. An unreachable Redis must never read as "no hold exists". |
+| Booking restarted mid-request | SIGTERM drains: the sweep stops scheduling, the server stops accepting, in-flight bookings finish, then pg/Redis/AMQP close (added 2026-08-25 - previously every service was SIGKILLed, exit 137). A booking still cut off mid-payment stays `pending` and the sweep reconciles it on the next boot. |
 | Double-publish / consumer replay | Notifications consumer must be idempotent (dedupe on bookingId). Formalized in Phase 3. |
 | RabbitMQ restarts under a live consumer | Notifications reports `degraded` for the duration and reconnects in-process (fixed 2026-08-25; it previously exited after 10 attempts and, worse, kept reporting `ok` while holding a dead connection). Covered by `tests/resilience.test.js`. Note the restart policy does not help here - the process never exited, it just stopped consuming. |
 

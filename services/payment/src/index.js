@@ -3,11 +3,17 @@ const { Pool } = require('pg');
 const migrate = require('./migrate');
 
 const PORT = process.env.PORT || 4003;
+// Must stay under Docker's stop timeout (10s by default) or the container is
+// SIGKILLed mid-drain and the whole exercise is pointless.
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
 
 const app = express();
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+let server = null;
+let shuttingDown = false;
 
 const ah = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -87,8 +93,34 @@ app.use((err, req, res, next) => {
 
 async function start() {
   await migrate(pool);
-  app.listen(PORT, () => console.log(`payment service listening on :${PORT}`));
+  server = app.listen(PORT, () => console.log(`payment service listening on :${PORT}`));
 }
+
+// Stop accepting requests, let in-flight ones finish, then release resources.
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`payment: ${signal} received — draining`);
+
+  // Backstop, so a wedged connection can't hold the container past Docker's
+  // SIGKILL deadline. unref'd: it must not itself keep the process alive.
+  setTimeout(() => {
+    console.error('payment: drain timed out — exiting anyway');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+
+  if (server) {
+    const closed = new Promise((resolve) => server.close(resolve));
+    server.closeIdleConnections(); // keep-alive sockets would otherwise stall close()
+    await closed;
+  }
+  await Promise.allSettled([pool.end()]);
+  console.log('payment: drained');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch((err) => {
   console.error('payment failed to start:', err);
