@@ -48,8 +48,11 @@ test('past events do not crowd out upcoming ones', { timeout: TIMEOUT }, async (
   const past = new Date(Date.now() - 30 * 86400000).toISOString();
   for (let i = 0; i < 25; i++) await createAt(`Past show ${i} ${Date.now()}`, past);
 
+  // One hour out, not one day: fixtures and the load-test prep both create
+  // day-out events, and enough of those would push a same-dated marker off the
+  // first page - which is correct paging, but not what this test is about.
   const marker = `upcoming${Date.now()}`;
-  const upcoming = await createAt(marker, new Date(Date.now() + 86400000).toISOString());
+  const upcoming = await createAt(marker, new Date(Date.now() + 3600000).toISOString());
 
   const page = await list();
   assert.ok(

@@ -136,6 +136,40 @@ services:
       - payment
       - notifications
 
+  # Observability, off by default so `docker compose up -d` and CI stay lean:
+  #   docker compose --profile monitoring up -d
+  # Prometheus scrapes each service's /metrics directly on this network; those
+  # endpoints are deliberately NOT reachable through the gateway.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Local-only convenience: no login wall on a dashboard that shows nothing
+      # sensitive and is bound to a dev machine. Do not carry this to a deploy.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
   # Load testing, off by default:
   #   docker compose --profile loadtest run --rm k6 run /scripts/flash-sale.js -e EVENT_ID=<id>
   # Run it against the test overlay - the default rate limit would throttle the
@@ -153,3 +187,5 @@ services:
 volumes:
   mongo-data:
   postgres-data:
+  prometheus-data:
+  grafana-data:

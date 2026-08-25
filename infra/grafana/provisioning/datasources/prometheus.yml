@@ -1,0 +1,12 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # Pinned, not auto-generated: the provisioned dashboard references this uid
+    # by name. Leave it out and Grafana mints a random one, the dashboard's
+    # datasource reference dangles, and every panel renders empty.
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

@@ -153,6 +153,34 @@ cancelled by the sweep.
 Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 `available | held | booked` per seat.
 
+## What the metrics actually showed (2026-08-25)
+
+Instrumenting the hold path contradicted the story above, and the numbers are
+worth keeping. Over a flash-sale run - 50 VUs, 20 seats, 2,149 attempts:
+
+```
+tickethub_holds_total{outcome="won"}     22
+tickethub_holds_total{outcome="lost"}     1     <- genuine Redis NX races
+tickethub_holds_total{outcome="booked"} 2129    <- rejected by the Postgres pre-check
+```
+
+k6 counted 2,129 "holds lost", which reads like the Redis layer absorbing a
+flash sale. It wasn't. `POST /holds` runs `SELECT 1 FROM bookings WHERE seat_id
+= $1 AND status <> 'cancelled'` *before* it touches Redis, so once a seat is
+sold every further attempt is turned away by Postgres - the exact database load
+the hold layer was chosen to absorb. Only **one** request in the whole run lost
+a real `SET NX` race.
+
+That pre-check is not wrong: it gives a fast, honest 409 and stops users holding
+seats they can never book. But "contention is absorbed before Postgres" is only
+true while a seat is *unsold*. In the sellout phase - the phase a flash sale
+mostly consists of - every attempt costs a Postgres round trip.
+
+Worth deciding, not yet decided: the sold-out set is small, bounded, and changes
+only on booking, so it could live in Redis as a negative cache and let the hold
+layer answer these itself. Recorded here rather than acted on, because the
+locking strategy is a decision this file owns.
+
 ## Failure edges (design-for, not hope-against)
 
 | Edge | Outcome |

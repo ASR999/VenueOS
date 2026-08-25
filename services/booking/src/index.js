@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const { createClient } = require('redis');
 const amqp = require('amqplib');
 const migrate = require('./migrate');
+const createMetrics = require('./metrics');
 
 const PORT = process.env.PORT || 4002;
 const QUEUE = 'booking.confirmed';
@@ -25,7 +26,48 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const metrics = createMetrics('booking');
+
+// Domain metrics. The default process metrics tell you the service is alive;
+// these tell you whether it is doing its job.
+const holdsTotal = new metrics.client.Counter({
+  name: 'tickethub_holds_total',
+  help: 'Seat hold attempts by outcome',
+  labelNames: ['outcome'], // won | lost | booked | unavailable
+  registers: [metrics.register],
+});
+const bookingsTotal = new metrics.client.Counter({
+  name: 'tickethub_bookings_total',
+  help: 'Booking attempts by final status',
+  labelNames: ['status'], // confirmed | cancelled | conflict | unknown
+  registers: [metrics.register],
+});
+const sweepRecoveriesTotal = new metrics.client.Counter({
+  name: 'tickethub_sweep_recoveries_total',
+  help: 'Paid bookings the reconciling sweep recovered',
+  registers: [metrics.register],
+});
+// The single most useful number in the system: how many confirmed bookings owe
+// an event. Steady non-zero means the relay is stuck; a spike then decay is a
+// broker outage healing itself.
+new metrics.client.Gauge({
+  name: 'tickethub_outbox_backlog',
+  help: 'Outbox rows not yet published',
+  registers: [metrics.register],
+  async collect() {
+    try {
+      const r = await pool.query('SELECT count(*) FROM outbox WHERE published_at IS NULL');
+      this.set(Number(r.rows[0].count));
+    } catch {
+      // Leave the previous value rather than reporting a false zero: "no
+      // backlog" and "cannot tell" must not look identical on a dashboard.
+    }
+  },
+});
+
 const app = express();
+app.use(metrics.middleware);
+app.get('/metrics', metrics.handler);
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -122,12 +164,16 @@ app.post(
       "SELECT 1 FROM bookings WHERE seat_id = $1 AND status <> 'cancelled'",
       [seatId]
     );
-    if (booked.rowCount > 0) return res.status(409).json({ error: 'seat already booked' });
+    if (booked.rowCount > 0) {
+      holdsTotal.inc({ outcome: 'booked' });
+      return res.status(409).json({ error: 'seat already booked' });
+    }
 
     const claimed = await redisCall(() =>
       redis.set(holdKey(eventId, seatId), userId, { NX: true, EX: HOLD_TTL_SECONDS })
     );
     if (claimed === 'OK') {
+      holdsTotal.inc({ outcome: 'won' });
       return res.status(201).json({
         seatId,
         userId,
@@ -146,6 +192,7 @@ app.post(
         expiresAt: new Date(Date.now() + Math.max(ttl, 0) * 1000).toISOString(),
       });
     }
+    holdsTotal.inc({ outcome: 'lost' });
     return res.status(409).json({ error: 'seat already held' });
   })
 );
@@ -235,7 +282,10 @@ app.post(
       );
       bookingId = r.rows[0].id;
     } catch (err) {
-      if (err.code === '23505') return res.status(409).json({ error: 'seat already booked' });
+      if (err.code === '23505') {
+        bookingsTotal.inc({ status: 'conflict' });
+        return res.status(409).json({ error: 'seat already booked' });
+      }
       throw err;
     }
 
@@ -259,6 +309,7 @@ app.post(
       // cancel here; the booking stays pending and the reconciling sweep
       // resolves it against the payment record either way.
       console.error(`booking: payment outcome unknown for ${bookingId}:`, err.message);
+      bookingsTotal.inc({ status: 'unknown' });
       return res.status(502).json({
         error: 'payment status unknown; booking will be resolved automatically',
         bookingId,
@@ -272,6 +323,7 @@ app.post(
       // but-charged seat is never reconciled. Leave it pending instead.
       if (resp.status >= 500) {
         console.error(`booking: payment outcome unknown for ${bookingId}: HTTP ${resp.status}`);
+        bookingsTotal.inc({ status: 'unknown' });
         return res.status(502).json({
           error: 'payment status unknown; booking will be resolved automatically',
           bookingId,
@@ -288,6 +340,7 @@ app.post(
     if (payment.status !== 'succeeded') {
       await settleBooking(bookingId, 'cancelled', payment.paymentId);
       await releaseHold(eventId, seatId, userId);
+      bookingsTotal.inc({ status: 'cancelled' });
       return res.status(402).json({ error: 'payment failed', bookingId });
     }
 
@@ -318,6 +371,7 @@ app.post(
     // the next relay tick. If it fails, the timer picks it up.
     relayOutbox().catch(() => {});
     await releaseHold(eventId, seatId, userId);
+    bookingsTotal.inc({ status: 'confirmed' });
     res.status(201).json({ bookingId, status: 'confirmed', paymentId: payment.paymentId, seatLabel: label });
   })
 );
@@ -488,6 +542,7 @@ async function sweepExpiredPendings() {
       });
       if (recovered) {
         console.log(`booking: sweep recovered paid booking ${b.id} — confirmed`);
+        sweepRecoveriesTotal.inc();
         relayOutbox().catch(() => {});
       }
     } else if (await settleBooking(b.id, 'cancelled', payment ? payment.paymentId : null)) {

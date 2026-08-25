@@ -65,6 +65,10 @@ cd client && npm install && npm run dev   # React app on :5173
 - Collection endpoints paginate and report the true total (`X-Total-Count`).
   Returning a truncated list with a 200 and no indication is how a real event
   went missing from the UI - found by clicking through it, not by a test.
+- Every service exposes `GET /metrics` for Prometheus, scraped directly on the
+  compose network and never proxied publicly. Label values must be bounded -
+  route *patterns* (`/bookings/:id`), never the URL, or every booking mints a
+  new time series.
 - Every service exposes `GET /health` reporting its own dependencies. Health
   must be derived from live state (e.g. `channel !== null`), never a flag set
   once at startup - a health check that cannot go from ok back to degraded is
@@ -114,5 +118,9 @@ cd client && npm install && npm run dev   # React app on :5173
    at-least-once, so notifications dedupes on bookingId before sending.
    Catalog search uses a weighted Mongo text index. Still open: a shared rate
    limiter store for multiple gateway instances.
+4. **Phase 4** (partly done) - Prometheus + Grafana landed 2026-08-25, behind a
+   `monitoring` compose profile; `infra/prometheus/` and `infra/grafana/` hold
+   the config and the provisioned dashboard. The AWS half is still open.
+   Original entry:
 4. **Phase 4** — AWS Free Plan deploy: EC2 + (ECS or k3s), SQS, Terraform,
    Prometheus/Grafana, CI/CD deploys.

@@ -1,6 +1,7 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const rateLimit = require('express-rate-limit');
+const createMetrics = require('./metrics');
 
 const PORT = process.env.PORT || 8080;
 // Must stay under Docker's stop timeout (10s by default) or the container is
@@ -19,7 +20,21 @@ const services = {
   notifications: process.env.NOTIFICATIONS_URL || 'http://localhost:4004',
 };
 
+// The gateway routes by mount prefix, so req.route is never set. Label by the
+// first two path segments (/api/booking) - bounded, and the useful grouping.
+const metrics = createMetrics('gateway', (req) => {
+  const segments = req.path.split('/').filter(Boolean).slice(0, 2);
+  return segments.length ? `/${segments.join('/')}` : '/';
+});
+const rateLimitedTotal = new metrics.client.Counter({
+  name: 'tickethub_rate_limited_total',
+  help: 'Requests rejected by the rate limiter',
+  registers: [metrics.register],
+});
+
 const app = express();
+app.use(metrics.middleware);
+app.get('/metrics', metrics.handler);
 
 async function aggregateHealth(req, res) {
   const results = {};
@@ -59,8 +74,23 @@ const limiter = rateLimit({
   standardHeaders: 'draft-7', // RateLimit-* headers, so clients can back off
   legacyHeaders: false,
   message: { error: 'too many requests' },
+  handler: (req, res, next, options) => {
+    rateLimitedTotal.inc();
+    res.status(options.statusCode).json(options.message);
+  },
 });
 app.use('/api', limiter);
+
+// Metrics are scraped from inside the compose network by Prometheus. Proxying
+// them publicly would hand out internal route names and timing for free, and
+// /api/booking/metrics would otherwise reach booking's endpoint like any other
+// path.
+app.use((req, res, next) => {
+  if (/^\/api\/[^/]+\/metrics\/?$/.test(req.path)) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  next();
+});
 
 // Public routes: /api/<service>/* -> <service>/*. Notifications is queue-driven
 // and internal-only, so it gets no public route.

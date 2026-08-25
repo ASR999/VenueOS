@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const { createClient } = require('redis');
+const createMetrics = require('./metrics');
 
 const PORT = process.env.PORT || 4001;
 // Must stay under Docker's stop timeout (10s by default) or the container is
@@ -28,7 +29,17 @@ let shuttingDown = false;
 const cache = createClient({ url: process.env.CACHE_REDIS_URL, disableOfflineQueue: true });
 cache.on('error', (err) => console.error('catalog: cache error:', err.message));
 
+const metrics = createMetrics('catalog');
+const cacheTotal = new metrics.client.Counter({
+  name: 'tickethub_cache_total',
+  help: 'Catalog cache lookups by result',
+  labelNames: ['result'], // hit | miss | bypass
+  registers: [metrics.register],
+});
+
 const app = express();
+app.use(metrics.middleware);
+app.get('/metrics', metrics.handler);
 app.use(express.json());
 
 const eventSchema = new mongoose.Schema(
@@ -72,16 +83,19 @@ async function cached(key, res, load) {
     const hit = await cache.get(key);
     if (hit !== null) {
       res.set('X-Cache', 'HIT');
+    cacheTotal.inc({ result: 'hit' });
       return res.type('json').send(hit);
     }
   } catch (err) {
     console.error('catalog: cache read failed, serving from mongo:', err.message);
     res.set('X-Cache', 'BYPASS');
+    cacheTotal.inc({ result: 'bypass' });
     return res.json(await load());
   }
 
   const value = await load();
   res.set('X-Cache', 'MISS');
+    cacheTotal.inc({ result: 'miss' });
   // Serialised once, stored exactly as it goes over the wire, so a HIT and a
   // MISS are byte-identical.
   const body = JSON.stringify(value);
@@ -103,6 +117,7 @@ async function cachedListing(key, res, load) {
     if (hit !== null) {
       const { total, events } = JSON.parse(hit);
       res.set('X-Cache', 'HIT');
+    cacheTotal.inc({ result: 'hit' });
       res.set('X-Total-Count', String(total));
       return res.json(events);
     }
@@ -110,12 +125,14 @@ async function cachedListing(key, res, load) {
     console.error('catalog: cache read failed, serving from mongo:', err.message);
     const [events, total] = await load();
     res.set('X-Cache', 'BYPASS');
+    cacheTotal.inc({ result: 'bypass' });
     res.set('X-Total-Count', String(total));
     return res.json(events);
   }
 
   const [events, total] = await load();
   res.set('X-Cache', 'MISS');
+    cacheTotal.inc({ result: 'miss' });
   res.set('X-Total-Count', String(total));
   try {
     await cache.set(key, JSON.stringify({ total, events }), { EX: CACHE_TTL_SECONDS });
@@ -169,6 +186,7 @@ app.get(
       if (!isDefaultView) {
         const [events, total] = await listEvents({ limit, skip, includePast });
         res.set('X-Cache', 'BYPASS');
+    cacheTotal.inc({ result: 'bypass' });
         res.set('X-Total-Count', String(total));
         return res.json(events);
       }
@@ -179,6 +197,7 @@ app.get(
     // searching for gibberish. The index is what makes this fast; the cache is
     // for the one URL everybody hits.
     res.set('X-Cache', 'BYPASS');
+    cacheTotal.inc({ result: 'bypass' });
     const results = await Event.find(
       { $text: { $search: q } },
       { score: { $meta: 'textScore' } }

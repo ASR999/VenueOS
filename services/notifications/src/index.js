@@ -1,6 +1,7 @@
 const express = require('express');
 const amqp = require('amqplib');
 const { createClient } = require('redis');
+const createMetrics = require('./metrics');
 
 const PORT = process.env.PORT || 4004;
 const QUEUE = 'booking.confirmed';
@@ -30,7 +31,17 @@ let connection = null;
 let server = null;
 let shuttingDown = false;
 
+const metrics = createMetrics('notifications');
+const notificationsTotal = new metrics.client.Counter({
+  name: 'tickethub_notifications_total',
+  help: 'Consumed booking.confirmed events by outcome',
+  labelNames: ['outcome'], // sent | duplicate | unparseable
+  registers: [metrics.register],
+});
+
 const app = express();
+app.use(metrics.middleware);
+app.get('/metrics', metrics.handler);
 
 app.get('/health', (req, res) => {
   const ok = channel !== null;
@@ -79,11 +90,13 @@ async function handleMessage(ch, msg) {
   if (!data || !data.bookingId) {
     // Unparseable and unroutable: ack it rather than let it cycle forever.
     console.log('notifications: unrecognized message:', msg.content.toString());
+    notificationsTotal.inc({ outcome: 'unparseable' });
     return ch.ack(msg);
   }
 
   if (await alreadySent(data.bookingId)) {
     console.log(`notifications: duplicate for booking ${data.bookingId} — already emailed, skipping`);
+    notificationsTotal.inc({ outcome: 'duplicate' });
     return ch.ack(msg);
   }
 
@@ -92,6 +105,7 @@ async function handleMessage(ch, msg) {
     `notifications: [mock email] to ${data.userId}: seat ${data.seatLabel} confirmed, ` +
       `booking ${data.bookingId} ($${(data.priceCents / 100).toFixed(2)})`
   );
+  notificationsTotal.inc({ outcome: 'sent' });
   ch.ack(msg);
 }
 

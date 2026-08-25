@@ -1,0 +1,17 @@
+# Scrapes the services directly on the compose network, not through the gateway:
+# metrics are internal, and going through the gateway would put scrapes under the
+# rate limiter and hide which instance answered.
+global:
+  scrape_interval: 5s # tight, so a 55s k6 run has enough points to read
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: tickethub
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - gateway:8080
+          - catalog:4001
+          - booking:4002
+          - payment:4003
+          - notifications:4004

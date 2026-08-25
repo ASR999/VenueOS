@@ -1,13 +1,24 @@
 const express = require('express');
 const { Pool } = require('pg');
 const migrate = require('./migrate');
+const createMetrics = require('./metrics');
 
 const PORT = process.env.PORT || 4003;
 // Must stay under Docker's stop timeout (10s by default) or the container is
 // SIGKILLed mid-drain and the whole exercise is pointless.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
 
+const metrics = createMetrics('payment');
+const paymentsTotal = new metrics.client.Counter({
+  name: 'tickethub_payments_total',
+  help: 'Payment requests by outcome',
+  labelNames: ['status'], // succeeded | failed | replay | mismatch
+  registers: [metrics.register],
+});
+
 const app = express();
+app.use(metrics.middleware);
+app.get('/metrics', metrics.handler);
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -53,6 +64,7 @@ app.post(
     );
     if (inserted.rowCount === 1) {
       const p = inserted.rows[0];
+      paymentsTotal.inc({ status: p.status });
       return res.status(201).json({ paymentId: p.id, status: p.status, replay: false });
     }
 
@@ -64,10 +76,14 @@ app.post(
     // Stripe-style: a key replay must be the SAME request. Reuse with a
     // different payload is a caller bug — surface it, never mask it.
     if (p.booking_id !== bookingId || p.amount_cents !== amountCents) {
+      paymentsTotal.inc({ status: 'mismatch' });
       return res
         .status(409)
         .json({ error: 'idempotency key reused with a different bookingId or amount' });
     }
+    // Counted separately from a first charge: a replay rate that climbs is a
+    // caller retrying, which is exactly what idempotency is absorbing.
+    paymentsTotal.inc({ status: 'replay' });
     res.status(200).json({ paymentId: p.id, status: p.status, replay: true });
   })
 );

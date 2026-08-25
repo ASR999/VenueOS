@@ -55,6 +55,7 @@ No dependencies to install - `node:test` and `fetch` are built in.
 | `tests/payment.test.js` | Rejected payments free the seat; idempotency keys can't be charged twice. |
 | `tests/recovery.test.js` | Ambiguous payment outcomes stay pending, and the sweep confirms or cancels them from the payment record. Stops the payment container, so tests run serially. |
 | `tests/resilience.test.js` | Services survive their dependencies restarting: notifications reports degraded during a broker outage and reconnects in-process. Restarts shared containers. |
+| `tests/metrics.test.js` | Every service exposes metrics, route labels are patterns not ids, counters move, and metrics aren't publicly reachable. |
 | `tests/listing.test.js` | Event listing: upcoming-only by default, visible truncation, stable paging, clamped parameters. |
 | `tests/outbox.test.js` | The transactional outbox: events survive a broker outage and are relayed on reconnect; cancelled bookings emit nothing. Stops RabbitMQ. |
 | `tests/idempotency.test.js` | A redelivered `booking.confirmed` does not send a second email. |
@@ -69,6 +70,36 @@ pull requests: build the stack with the test overlay, wait for aggregate health,
 `npm test`, dump service logs if anything failed, tear down. It needs no secrets
 and no external services. A run takes roughly 3 minutes of test time on top of
 the image build.
+
+## Monitoring
+
+Prometheus and Grafana run behind a profile, so the default stack and CI stay
+lean:
+
+```sh
+docker compose --profile monitoring up -d
+```
+
+- Grafana: http://localhost:3000 (no login - anonymous admin, local only)
+- Prometheus: http://localhost:9090
+
+The **TicketHub overview** dashboard is provisioned automatically. Run a load
+test with it open and you can watch seat contention, the outbox backlog, and
+p95 latency move in real time.
+
+Prometheus scrapes each service's `/metrics` directly on the compose network.
+Those endpoints are deliberately **not** reachable through the gateway -
+`/api/booking/metrics` returns 404.
+
+| Metric | What it tells you |
+| --- | --- |
+| `tickethub_holds_total{outcome}` | won / lost / booked - where hold attempts actually die |
+| `tickethub_bookings_total{status}` | confirmed / cancelled / conflict / unknown |
+| `tickethub_outbox_backlog` | events owed to the broker; should be 0 |
+| `tickethub_cache_total{result}` | catalog cache hit / miss / bypass |
+| `tickethub_notifications_total{outcome}` | sent vs duplicates suppressed |
+| `tickethub_payments_total{status}` | includes `replay`, i.e. idempotency absorbing retries |
+| `tickethub_sweep_recoveries_total` | paid bookings the sweep rescued |
 
 ## Load tests
 
