@@ -59,10 +59,15 @@ services:
     environment:
       PORT: 4001
       MONGO_URL: mongodb://mongo:27017/catalog
+      # Redis DB 1 - booking owns DB 0. Same container, separate logical
+      # database, exactly like the shared Postgres with a database per service.
+      CACHE_REDIS_URL: redis://redis:6379/1
     ports:
       - "4001:4001"
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   booking:
@@ -71,7 +76,7 @@ services:
     environment:
       PORT: 4002
       DATABASE_URL: postgres://dev:dev@postgres:5432/booking
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://rabbitmq:5672
       GATEWAY_URL: http://gateway:8080
     ports:
@@ -102,10 +107,14 @@ services:
     environment:
       PORT: 4004
       RABBITMQ_URL: amqp://rabbitmq:5672
+      # Redis DB 2 - booking owns 0, catalog owns 1. Consumer-side dedupe.
+      DEDUPE_REDIS_URL: redis://redis:6379/2
     ports:
       - "4004:4004"
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   gateway:
@@ -113,6 +122,8 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8080
+      RATE_LIMIT_WINDOW_MS: 60000
+      RATE_LIMIT_MAX: 120
       CATALOG_URL: http://catalog:4001
       BOOKING_URL: http://booking:4002
       PAYMENT_URL: http://payment:4003
@@ -124,6 +135,20 @@ services:
       - booking
       - payment
       - notifications
+
+  # Load testing, off by default:
+  #   docker compose --profile loadtest run --rm k6 run /scripts/flash-sale.js -e EVENT_ID=<id>
+  # Run it against the test overlay - the default rate limit would throttle the
+  # load generator, which measures the limiter instead of the locking strategy.
+  k6:
+    image: grafana/k6:latest
+    profiles: ["loadtest"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+    volumes:
+      - ./loadtest:/scripts:ro
+    depends_on:
+      - gateway
 
 volumes:
   mongo-data:

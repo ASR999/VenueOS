@@ -14,7 +14,7 @@ React client (Vite, :5173) → API gateway (Express proxy, :8080) → services:
 | catalog       | 4001 | MongoDB          | events/venues; read-heavy, cache-friendly  |
 | booking       | 4002 | Postgres + Redis | seat holds/reservations; transactional core |
 | payment       | 4003 | Postgres         | mock payments; idempotency                 |
-| notifications | 4004 | (queue only)     | consumes `booking.confirmed` from RabbitMQ |
+| notifications | 4004 | Redis DB 2       | consumes `booking.confirmed`; dedupes on bookingId |
 
 Gateway routes `/api/<service>/*` → service. Notifications has no public route.
 
@@ -59,6 +59,9 @@ cd client && npm install && npm run dev   # React app on :5173
   hardcoded hosts/ports/credentials. Booking's tunables are `HOLD_TTL_SECONDS`,
   `SWEEP_INTERVAL_MS` and `PAYMENT_TIMEOUT_MS` - all defaulted in code and
   overridden by `docker-compose.test.yml`.
+- Events are published through the outbox, never directly from a request
+  handler. If you find yourself calling `channel.sendToQueue` outside the relay,
+  the write and the publish are no longer atomic and the pattern is defeated.
 - Every service exposes `GET /health` reporting its own dependencies. Health
   must be derived from live state (e.g. `channel !== null`), never a flag set
   once at startup - a health check that cannot go from ok back to degraded is
@@ -79,6 +82,18 @@ cd client && npm install && npm run dev   # React app on :5173
 - One Postgres container, but separate databases per service (`booking`,
   `payment`) — created in `infra/postgres/init.sql`. Schema/migrations live
   with the owning service (tooling comes in Phase 1).
+- Same arrangement for Redis: one container, one logical DB per service.
+  Booking owns DB 0 (seat holds), catalog owns DB 1 (read cache), notifications
+  owns DB 2 (consumer dedupe). A service never touches another's DB index -
+  that is the hard rule, not an exception.
+- Redis clients set `disableOfflineQueue`. Without it node-redis holds commands
+  until Redis returns, so a request hangs instead of failing - which is worse
+  than either failing open or closed.
+- A dependency is either load-bearing or optional, and the code has to say
+  which. Booking's Redis is load-bearing: it fails CLOSED (503), because an
+  unreachable Redis must never read as "no hold exists". Catalog's cache is
+  optional: it fails OPEN (serves from Mongo, `X-Cache: BYPASS`) and never
+  makes the service degraded.
 
 ## Roadmap
 
@@ -86,7 +101,15 @@ cd client && npm install && npm run dev   # React app on :5173
    TTL, bookings with a chosen locking strategy, mock payment flow, real
    `booking.confirmed` events. Write DESIGN.md before starting.
 2. **Phase 2** — caching, rate limiting, k6 load tests against the locking
-   strategy.
-3. **Phase 3** — outbox pattern, idempotent consumers, search.
+   strategy. **Done 2026-08-25**: catalog cache-aside on Redis DB 1, a gateway
+   rate limiter (`RATE_LIMIT_*`, in-memory so per-instance), and `loadtest/`.
+   A shared limiter store for multiple gateway instances is Phase 3.
+3. **Phase 3** — outbox pattern, idempotent consumers, search. **Done
+   2026-08-25**: booking writes `booking.confirmed` into an `outbox` table in
+   the same transaction as the status change, and a relay drains it with
+   publisher confirms and `FOR UPDATE SKIP LOCKED`. That makes delivery
+   at-least-once, so notifications dedupes on bookingId before sending.
+   Catalog search uses a weighted Mongo text index. Still open: a shared rate
+   limiter store for multiple gateway instances.
 4. **Phase 4** — AWS Free Plan deploy: EC2 + (ECS or k3s), SQS, Terraform,
    Prometheus/Grafana, CI/CD deploys.

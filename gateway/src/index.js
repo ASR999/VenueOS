@@ -1,10 +1,13 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const rateLimit = require('express-rate-limit');
 
 const PORT = process.env.PORT || 8080;
 // Must stay under Docker's stop timeout (10s by default) or the container is
 // SIGKILLed mid-drain and the whole exercise is pointless.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '120', 10);
 
 let server = null;
 let shuttingDown = false;
@@ -42,6 +45,22 @@ async function aggregateHealth(req, res) {
 
 app.get('/health', aggregateHealth);
 app.get('/api/health', aggregateHealth);
+
+// Rate limiting lives at the edge so every service is covered by one policy and
+// none of them has to care. Registered AFTER /health: monitoring must never be
+// throttled, or the limiter blinds you exactly when you need to look.
+//
+// In-memory store, so the counter is per gateway instance. That is honest for a
+// single gateway; running several would need a shared store (Redis), which is
+// the same lesson the booking holds teach - Phase 3 territory.
+const limiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  limit: RATE_LIMIT_MAX,
+  standardHeaders: 'draft-7', // RateLimit-* headers, so clients can back off
+  legacyHeaders: false,
+  message: { error: 'too many requests' },
+});
+app.use('/api', limiter);
 
 // Public routes: /api/<service>/* -> <service>/*. Notifications is queue-driven
 // and internal-only, so it gets no public route.

@@ -1,5 +1,6 @@
 const express = require('express');
 const amqp = require('amqplib');
+const { createClient } = require('redis');
 
 const PORT = process.env.PORT || 4004;
 const QUEUE = 'booking.confirmed';
@@ -10,10 +11,20 @@ const PREFETCH = parseInt(process.env.PREFETCH || '10', 10);
 // Must stay under Docker's stop timeout (10s by default) or the container is
 // SIGKILLed mid-drain and the whole exercise is pointless.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
+// How long a bookingId is remembered as "already emailed". Long enough to cover
+// any plausible redelivery; not forever, because this is a dedupe window and not
+// an archive.
+const DEDUPE_TTL_SECONDS = parseInt(process.env.DEDUPE_TTL_SECONDS || '86400', 10);
 
 // The single source of truth for "are we actually consuming?". /health reports
 // this rather than a one-way flag, so a connection that drops after startup
 // stops claiming to be healthy.
+// Redis DB 2 - booking owns 0, catalog owns 1. The consumer needs somewhere
+// durable to remember what it has already sent: an in-memory set would forget
+// on every restart, which is precisely when redeliveries arrive.
+const dedupe = createClient({ url: process.env.DEDUPE_REDIS_URL, disableOfflineQueue: true });
+dedupe.on('error', (err) => console.error('notifications: dedupe store error:', err.message));
+
 let channel = null;
 let connection = null;
 let server = null;
@@ -25,27 +36,62 @@ app.get('/health', (req, res) => {
   const ok = channel !== null;
   res
     .status(ok ? 200 : 503)
-    .json({ service: 'notifications', status: ok ? 'ok' : 'degraded', rabbitmq: ok ? 'ok' : 'down' });
+    .json({
+      service: 'notifications',
+      status: ok ? 'ok' : 'degraded',
+      rabbitmq: ok ? 'ok' : 'down',
+      // Reported, but not part of status: dedupe failing open degrades quality
+      // (a possible duplicate email), not availability.
+      dedupe: dedupe.isReady ? 'ok' : 'down',
+    });
 });
 
-function handleMessage(ch, msg) {
+// The outbox publishes at-least-once: a relay that publishes and then fails to
+// mark the row will re-send. So the consumer, not the publisher, is responsible
+// for the customer receiving exactly one email.
+//
+// SET NX is the claim - the same primitive as a seat hold, for the same reason:
+// it is atomic, so two consumers racing the same redelivery cannot both win.
+async function alreadySent(bookingId) {
+  try {
+    const claimed = await dedupe.set(`sent:${bookingId}`, '1', {
+      NX: true,
+      EX: DEDUPE_TTL_SECONDS,
+    });
+    return claimed !== 'OK';
+  } catch (err) {
+    // Fail OPEN. A duplicate confirmation email is a nuisance; a missing one is
+    // a customer who thinks they have no ticket.
+    console.error('notifications: dedupe unavailable, sending anyway:', err.message);
+    return false;
+  }
+}
+
+async function handleMessage(ch, msg) {
   if (!msg) return; // consumer cancelled by the broker
-  // Mock email send. Consumer-side idempotency (dedupe on bookingId) is
-  // formalized in Phase 3.
   let data = null;
   try {
     data = JSON.parse(msg.content.toString());
   } catch {
     /* fall through to raw log */
   }
-  if (data && data.bookingId) {
-    console.log(
-      `notifications: [mock email] to ${data.userId}: seat ${data.seatLabel} confirmed, ` +
-        `booking ${data.bookingId} ($${(data.priceCents / 100).toFixed(2)})`
-    );
-  } else {
+
+  if (!data || !data.bookingId) {
+    // Unparseable and unroutable: ack it rather than let it cycle forever.
     console.log('notifications: unrecognized message:', msg.content.toString());
+    return ch.ack(msg);
   }
+
+  if (await alreadySent(data.bookingId)) {
+    console.log(`notifications: duplicate for booking ${data.bookingId} — already emailed, skipping`);
+    return ch.ack(msg);
+  }
+
+  // Mock email send.
+  console.log(
+    `notifications: [mock email] to ${data.userId}: seat ${data.seatLabel} confirmed, ` +
+      `booking ${data.bookingId} ($${(data.priceCents / 100).toFixed(2)})`
+  );
   ch.ack(msg);
 }
 
@@ -65,7 +111,11 @@ async function connectQueue() {
       const ch = await conn.createChannel();
       await ch.assertQueue(QUEUE, { durable: true });
       await ch.prefetch(PREFETCH);
-      await ch.consume(QUEUE, (msg) => handleMessage(ch, msg));
+      await ch.consume(QUEUE, (msg) =>
+        handleMessage(ch, msg).catch((err) =>
+          console.error('notifications: handler failed:', err.message)
+        )
+      );
 
       // Only once the consumer is genuinely running: a failure during setup is
       // retried by this loop, and must not also spawn a second loop from here.
@@ -96,6 +146,8 @@ function start() {
   // Listen first so /health can report "degraded" while the broker is still
   // coming up, instead of refusing connections.
   server = app.listen(PORT, () => console.log(`notifications service listening on :${PORT}`));
+  // Not awaited: dedupe is best-effort, so a slow Redis must not delay consuming.
+  dedupe.connect().catch((err) => console.error('notifications: dedupe unavailable:', err.message));
   connectQueue();
 }
 
@@ -118,7 +170,7 @@ async function shutdown(signal) {
     server.closeIdleConnections(); // keep-alive sockets would otherwise stall close()
     await closed;
   }
-  await Promise.allSettled([connection && connection.close()]);
+  await Promise.allSettled([connection && connection.close(), dedupe.isOpen && dedupe.quit()]);
   console.log('notifications: drained');
   process.exit(0);
 }

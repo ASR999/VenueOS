@@ -3,6 +3,12 @@
 Decisions for the booking core. Written before implementation, updated when
 reality disagrees. The load tests in Phase 2 will judge this design.
 
+**Verdict (2026-08-25).** They have. `loadtest/flash-sale.js` ramped 50 virtual
+users onto 20 seats: 2,155 checkout attempts, 20 confirmed, **0 oversold**, p95
+request latency 6.6ms. The Redis holds absorbed the contention as intended -
+2,135 attempts were turned away at the hold, never reaching Postgres - and the
+partial unique index admitted exactly one booking per seat. The design stands.
+
 ## Decision: locking strategy (2026-07-14)
 
 **Chosen: Redis holds + Postgres unique constraint backstop** (over pessimistic
@@ -113,6 +119,23 @@ reconcile unknown outcomes. (Mock: request may pass `simulate: "fail"`.)
 All pending→terminal transitions are guarded with `AND status='pending'`, so
 a booking the sweep already resolved can never be overridden or resurrected.
 
+### The outbox
+
+`booking.confirmed` is never published from a request handler. `settleBooking`
+writes the status change and an `outbox` row in one transaction, so the booking
+being confirmed and the event being owed are the same fact - there is no window
+where one is true and the other isn't.
+
+A relay drains the table: `SELECT ... FOR UPDATE SKIP LOCKED` (several booking
+instances can relay at once without double-publishing or blocking each other),
+publish with a **confirm channel**, then mark `published_at`. Publishing before
+marking is deliberate - the reverse would lose events - and it makes delivery
+at-least-once, which is why the consumer dedupes.
+
+This does hold row locks across a network call, which the booking path
+deliberately never does. The difference: these locks are on outbox rows nobody
+contends for, and `SKIP LOCKED` turns contention into a no-op rather than a queue.
+
 ### The reconciling sweep
 
 Every `SWEEP_INTERVAL_MS`, expired pending bookings are resolved against the
@@ -141,16 +164,16 @@ Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 | Payment returns `5xx`, or the gateway returns a proxy error | Same as a timeout — treated as unknown. Booking stays `pending`, sweep decides from the payment record. Cancelling here would strand a real charge (next row). |
 | Booking is `cancelled` but a charge exists for its key | **Unreconciled — known gap.** The sweep only revisits `pending` rows, so nothing ever notices. Closing this needs a refund/void endpoint on payment plus a sweep over recently-cancelled bookings. Deferred; the `5xx`-is-unknown rule above removes the only path that reached it in practice. |
 | User abandons payment | Pending booking passes `expires_at`; sweep finds no payment for the key and cancels, freeing the seat. |
-| RabbitMQ down at publish | Event is lost (logged loudly); the connection retries forever so the window is brief. Accepted Phase 1 gap — the outbox pattern (Phase 3) makes publishes atomic with the booking write. |
+| RabbitMQ down at publish | **Closed 2026-08-25.** The event is written to the `outbox` table in the same transaction as the confirmation, so it cannot be lost by a broker outage or a crash. A relay drains it on a timer, nudged after each confirmation, and publishes with publisher confirms - a row is marked published only once the broker has acknowledged it. Covered by `tests/outbox.test.js`, which books a seat with RabbitMQ stopped and watches the event go out on reconnect. |
 | Redis restarts (holds lost) | Multiple users may *believe* they hold; constraint picks one winner at insert. Overselling of holds possible, of bookings impossible. |
 | Redis down | Every hold/seat-map/booking request returns 503 (fail closed) and returns it *fast*. Existing pending bookings unaffected. Corrected 2026-08-25: this table said 503 but the request actually hung forever, because node-redis queues commands while disconnected - the client now sets `disableOfflineQueue`. An unreachable Redis must never read as "no hold exists". |
 | Booking restarted mid-request | SIGTERM drains: the sweep stops scheduling, the server stops accepting, in-flight bookings finish, then pg/Redis/AMQP close (added 2026-08-25 - previously every service was SIGKILLed, exit 137). A booking still cut off mid-payment stays `pending` and the sweep reconciles it on the next boot. |
-| Double-publish / consumer replay | Notifications consumer must be idempotent (dedupe on bookingId). Formalized in Phase 3. |
+| Double-publish / consumer replay | **Closed 2026-08-25.** The relay publishes then marks the row; a failure between the two re-sends, so delivery is deliberately at-least-once. Notifications claims `sent:{bookingId}` in Redis with `SET NX` before sending - the same atomic primitive as a seat hold, for the same reason. The dedupe store fails OPEN: a duplicate email is a nuisance, a missing one is a customer who thinks they have no ticket. |
 | RabbitMQ restarts under a live consumer | Notifications reports `degraded` for the duration and reconnects in-process (fixed 2026-08-25; it previously exited after 10 attempts and, worse, kept reporting `ok` while holding a dead connection). Covered by `tests/resilience.test.js`. Note the restart policy does not help here - the process never exited, it just stopped consuming. |
 
 ## Explicitly deferred
 
-- **Outbox pattern** for atomically-published events → Phase 3.
+- ~~**Outbox pattern** for atomically-published events~~ — done 2026-08-25; see the failure-edge table and `migrations/003_outbox.sql`.
 - **Auth**: `userId` is a client-supplied header. Fake, fine for now.
 - **Seat seeding**: script/admin endpoint, not a product feature.
 - **Multi-seat bookings** (lock-ordering lessons) → after single-seat works.

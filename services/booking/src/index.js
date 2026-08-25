@@ -14,6 +14,11 @@ const SWEEP_INTERVAL_MS = parseInt(process.env.SWEEP_INTERVAL_MS || '60000', 10)
 // arrives as a client-side abort instead of the 5xx it really is.
 const PAYMENT_TIMEOUT_MS = parseInt(process.env.PAYMENT_TIMEOUT_MS || '5000', 10);
 const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS || '3000', 10);
+const OUTBOX_INTERVAL_MS = parseInt(process.env.OUTBOX_INTERVAL_MS || '1000', 10);
+const OUTBOX_BATCH = parseInt(process.env.OUTBOX_BATCH || '100', 10);
+// Published rows are kept briefly for debugging, then pruned - an outbox that
+// only ever grows is a slow leak.
+const OUTBOX_RETENTION_HOURS = parseInt(process.env.OUTBOX_RETENTION_HOURS || '24', 10);
 // Must stay under Docker's stop timeout (10s by default) or the container is
 // SIGKILLed mid-drain and the whole exercise is pointless.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
@@ -34,6 +39,8 @@ let channel = null;
 let connection = null;
 let server = null;
 let sweepTimer = null;
+let outboxTimer = null;
+let relaying = false;
 let shuttingDown = false;
 
 const holdKey = (eventId, seatId) => `hold:${eventId}:${seatId}`;
@@ -284,7 +291,18 @@ app.post(
       return res.status(402).json({ error: 'payment failed', bookingId });
     }
 
-    const confirmed = await settleBooking(bookingId, 'confirmed', payment.paymentId);
+    const confirmed = await settleBooking(bookingId, 'confirmed', payment.paymentId, {
+      type: QUEUE,
+      payload: {
+        bookingId,
+        eventId,
+        seatId,
+        seatLabel: label,
+        userId,
+        priceCents,
+        confirmedAt: new Date().toISOString(),
+      },
+    });
     if (!confirmed) {
       // The sweep settled this booking while payment was in flight (only
       // reachable with extreme TTL/timeout misconfiguration). The charge is
@@ -296,15 +314,9 @@ app.post(
         bookingId,
       });
     }
-    publishConfirmed({
-      bookingId,
-      eventId,
-      seatId,
-      seatLabel: label,
-      userId,
-      priceCents,
-      confirmedAt: new Date().toISOString(),
-    });
+    // The event is already durable in the outbox; this only avoids waiting for
+    // the next relay tick. If it fails, the timer picks it up.
+    relayOutbox().catch(() => {});
     await releaseHold(eventId, seatId, userId);
     res.status(201).json({ bookingId, status: 'confirmed', paymentId: payment.paymentId, seatLabel: label });
   })
@@ -333,13 +345,100 @@ app.use((err, req, res, next) => {
 // Every pending→terminal transition goes through here. The status guard makes
 // settlement race-safe: a booking the sweep already resolved stays resolved
 // (no resurrection, no double-settle). Returns whether this call won.
-async function settleBooking(bookingId, status, paymentId = null) {
-  const r = await pool.query(
-    `UPDATE bookings SET status = $2, payment_id = $3, updated_at = now()
-     WHERE id = $1 AND status = 'pending'`,
-    [bookingId, status, paymentId]
-  );
-  return r.rowCount === 1;
+async function settleBooking(bookingId, status, paymentId = null, event = null) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const r = await client.query(
+      `UPDATE bookings SET status = $2, payment_id = $3, updated_at = now()
+       WHERE id = $1 AND status = 'pending'`,
+      [bookingId, status, paymentId]
+    );
+    if (r.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    // THE POINT OF THE OUTBOX: this INSERT shares the transaction with the
+    // UPDATE above. The booking is confirmed and the event is owed, atomically.
+    // There is no instant where one is true and the other is not.
+    if (event) {
+      await client.query(
+        'INSERT INTO outbox (aggregate_id, type, payload) VALUES ($1, $2, $3)',
+        [bookingId, event.type, JSON.stringify(event.payload)]
+      );
+    }
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Drains the outbox to RabbitMQ. Runs on a timer and is nudged after each
+// confirmation so the happy path stays fast.
+//
+// FOR UPDATE SKIP LOCKED lets several booking instances relay concurrently
+// without publishing a row twice or waiting on each other. This does hold row
+// locks across a network call - the opposite of the rule the booking path
+// follows - but these locks are on outbox rows nobody contends for, and SKIP
+// LOCKED turns contention into a no-op rather than a queue.
+async function relayOutbox() {
+  if (!channel || shuttingDown || relaying) return;
+  relaying = true;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT id, type, payload FROM outbox
+       WHERE published_at IS NULL
+       ORDER BY created_at
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [OUTBOX_BATCH]
+    );
+    for (const row of rows) {
+      // Publisher confirms: the broker must acknowledge it took the message
+      // before we mark it published. sendToQueue on a plain channel reports
+      // only backpressure, which says nothing about delivery.
+      await new Promise((resolve, reject) => {
+        channel.sendToQueue(
+          row.type,
+          Buffer.from(JSON.stringify(row.payload)),
+          { persistent: true, messageId: row.id },
+          (err) => (err ? reject(err) : resolve())
+        );
+      });
+      await client.query('UPDATE outbox SET published_at = now() WHERE id = $1', [row.id]);
+    }
+    await client.query('COMMIT');
+    if (rows.length > 0) console.log(`booking: relayed ${rows.length} outbox event(s)`);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    // Nothing was marked published, so the batch is retried whole. A publish
+    // that landed just before the failure is re-sent - at-least-once, which is
+    // exactly why the consumer dedupes.
+    console.error('booking: outbox relay failed (will retry):', err.message);
+  } finally {
+    client.release();
+    relaying = false;
+  }
+}
+
+async function pruneOutbox() {
+  try {
+    const r = await pool.query(
+      `DELETE FROM outbox
+       WHERE published_at IS NOT NULL
+         AND published_at < now() - make_interval(hours => $1)`,
+      [OUTBOX_RETENTION_HOURS]
+    );
+    if (r.rowCount > 0) console.log(`booking: pruned ${r.rowCount} published outbox row(s)`);
+  } catch (err) {
+    console.error('booking: outbox prune failed:', err.message);
+  }
 }
 
 async function releaseHold(eventId, seatId, userId) {
@@ -348,17 +447,6 @@ async function releaseHold(eventId, seatId, userId) {
   } catch (err) {
     console.error('booking: hold release failed (will expire via TTL):', err.message);
   }
-}
-
-// Known Phase 1 gap (see DESIGN.md): if the process dies between payment
-// success and this publish, the event is lost. The outbox pattern fixes this
-// in Phase 3.
-function publishConfirmed(payload) {
-  if (!channel) {
-    console.error('booking: RabbitMQ channel down — booking.confirmed NOT published:', payload.bookingId);
-    return;
-  }
-  channel.sendToQueue(QUEUE, Buffer.from(JSON.stringify(payload)), { persistent: true });
 }
 
 // The reconciling sweep (DESIGN.md): expired pending bookings are resolved
@@ -386,9 +474,9 @@ async function sweepExpiredPendings() {
     }
 
     if (payment && payment.status === 'succeeded') {
-      if (await settleBooking(b.id, 'confirmed', payment.paymentId)) {
-        console.log(`booking: sweep recovered paid booking ${b.id} — confirmed`);
-        publishConfirmed({
+      const recovered = await settleBooking(b.id, 'confirmed', payment.paymentId, {
+        type: QUEUE,
+        payload: {
           bookingId: b.id,
           eventId: b.event_id,
           seatId: b.seat_id,
@@ -396,7 +484,11 @@ async function sweepExpiredPendings() {
           userId: b.user_id,
           priceCents: b.price_cents,
           confirmedAt: new Date().toISOString(),
-        });
+        },
+      });
+      if (recovered) {
+        console.log(`booking: sweep recovered paid booking ${b.id} — confirmed`);
+        relayOutbox().catch(() => {});
       }
     } else if (await settleBooking(b.id, 'cancelled', payment ? payment.paymentId : null)) {
       console.log(`booking: sweep cancelled stale pending booking ${b.id}`);
@@ -405,9 +497,18 @@ async function sweepExpiredPendings() {
 }
 
 function startSweep() {
-  sweepTimer = setInterval(
-    () => sweepExpiredPendings().catch((err) => console.error('booking: sweep error:', err.message)),
-    SWEEP_INTERVAL_MS
+  sweepTimer = setInterval(() => {
+    sweepExpiredPendings().catch((err) => console.error('booking: sweep error:', err.message));
+    pruneOutbox();
+  }, SWEEP_INTERVAL_MS);
+}
+
+// The relay's safety net. The nudge after each confirmation handles the happy
+// path; this is what drains the backlog after a broker outage or a crash.
+function startOutboxRelay() {
+  outboxTimer = setInterval(
+    () => relayOutbox().catch((err) => console.error('booking: relay error:', err.message)),
+    OUTBOX_INTERVAL_MS
   );
 }
 
@@ -423,7 +524,9 @@ async function connectQueue() {
       // process down before setup finishes.
       conn.on('error', (err) => console.error('booking: RabbitMQ error:', err.message));
 
-      const ch = await conn.createChannel();
+      // Confirm channel, not a plain one: the outbox relay must know the broker
+      // actually accepted a message before it marks the row published.
+      const ch = await conn.createConfirmChannel();
       await ch.assertQueue(QUEUE, { durable: true });
 
       // Only once the queue is asserted: a failure during setup is retried by
@@ -440,6 +543,8 @@ async function connectQueue() {
       connection = conn;
       channel = ch;
       console.log('booking: connected to RabbitMQ');
+      // Anything that piled up while the broker was away goes out now.
+      relayOutbox().catch(() => {});
       return;
     } catch {
       if (conn) await conn.close().catch(() => {});
@@ -458,6 +563,7 @@ async function start() {
   await redis.connect();
   connectQueue();
   startSweep();
+  startOutboxRelay();
   server = app.listen(PORT, () => console.log(`booking service listening on :${PORT}`));
 }
 
@@ -478,6 +584,7 @@ async function shutdown(signal) {
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
   clearInterval(sweepTimer);
+  clearInterval(outboxTimer);
   if (server) {
     const closed = new Promise((resolve) => server.close(resolve));
     server.closeIdleConnections(); // keep-alive sockets would otherwise stall close()

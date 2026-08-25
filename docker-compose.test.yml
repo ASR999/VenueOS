@@ -1,5 +1,6 @@
 # Test overlay: collapses the hold/expiry timers so the reconciling sweep can be
-# exercised in seconds instead of minutes.
+# exercised in seconds instead of minutes, and lifts the rate limit so the
+# concurrency tests (which are deliberately abusive) aren't throttled.
 #   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d
 #   npm test
 services:
@@ -10,3 +11,13 @@ services:
       # Longer than the gateway takes to surface a proxy error, so tests exercise
       # the real 5xx response path instead of a client-side abort.
       PAYMENT_TIMEOUT_MS: 15000
+  catalog:
+    environment:
+      # Short enough that a test can watch an entry expire.
+      CACHE_TTL_SECONDS: 5
+  gateway:
+    environment:
+      # A short window so a test that trips the limit doesn't poison the ones
+      # after it, and a ceiling well above any burst the suite itself produces.
+      RATE_LIMIT_WINDOW_MS: 10000
+      RATE_LIMIT_MAX: 500

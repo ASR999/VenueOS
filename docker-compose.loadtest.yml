@@ -1,0 +1,12 @@
+# Load-test overlay. Use ON TOP OF docker-compose.test.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml \
+#                  -f docker-compose.loadtest.yml up -d
+#
+# The rate limiter has to come off, or the load test measures the limiter rather
+# than the locking strategy - the first run of this suite produced 216k 429s and
+# nothing else. Point k6 at the default config separately if the limiter is what
+# you want to exercise.
+services:
+  gateway:
+    environment:
+      RATE_LIMIT_MAX: 100000000
