@@ -1,0 +1,12 @@
+# Test overlay: collapses the hold/expiry timers so the reconciling sweep can be
+# exercised in seconds instead of minutes.
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d
+#   npm test
+services:
+  booking:
+    environment:
+      HOLD_TTL_SECONDS: 20
+      SWEEP_INTERVAL_MS: 1000
+      # Longer than the gateway takes to surface a proxy error, so tests exercise
+      # the real 5xx response path instead of a client-side abort.
+      PAYMENT_TIMEOUT_MS: 15000

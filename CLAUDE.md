@@ -48,14 +48,27 @@ cd client && npm install && npm run dev   # React app on :5173
   (body: eventId, seatId, userId), then `docker compose logs notifications`
   for the mock confirmation email. `simulatePaymentFailure: true` in the
   booking body exercises the payment-failed path.
+- Tests: bring the stack up with the `docker-compose.test.yml` overlay (short
+  hold/sweep timers), then `npm test` from the repo root. See README.md.
 
 ## Conventions
 
 - Services are plain JavaScript, CommonJS, Express; entry point `src/index.js`.
   Client is ESM/React. No TypeScript for now.
 - All config via environment variables (set in docker-compose.yml); no
-  hardcoded hosts/ports/credentials.
-- Every service exposes `GET /health` reporting its own dependencies.
+  hardcoded hosts/ports/credentials. Booking's tunables are `HOLD_TTL_SECONDS`,
+  `SWEEP_INTERVAL_MS` and `PAYMENT_TIMEOUT_MS` - all defaulted in code and
+  overridden by `docker-compose.test.yml`.
+- Every service exposes `GET /health` reporting its own dependencies. Health
+  must be derived from live state (e.g. `channel !== null`), never a flag set
+  once at startup - a health check that cannot go from ok back to degraded is
+  worse than none.
+- Long-lived connections (RabbitMQ) reconnect forever rather than exiting after
+  N attempts: a service that gives up looks alive while silently doing nothing.
+  Attach the `close`-triggered reconnect only after setup succeeds, so a failure
+  mid-setup is retried by the loop and not by a second competing one.
+- Images build with `npm ci` from a committed `package-lock.json`; every service
+  and the gateway has one.
 - One Postgres container, but separate databases per service (`booking`,
   `payment`) — created in `infra/postgres/init.sql`. Schema/migrations live
   with the owning service (tooling comes in Phase 1).

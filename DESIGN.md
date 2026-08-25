@@ -100,10 +100,15 @@ reconcile unknown outcomes. (Mock: request may pass `simulate: "fail"`.)
    *unknown* (timeout/network error, where the charge may exist server-side):
    - succeeded → `UPDATE status='confirmed'` (guarded `AND status='pending'`),
      publish `booking.confirmed`, `DEL` hold → `201`.
-   - failed/rejected (payment service answered — definitely no charge) →
-     `UPDATE status='cancelled'`, `DEL` hold → `402`/`502`.
+   - failed/rejected → `UPDATE status='cancelled'`, `DEL` hold → `402`/`502`.
+     This is *only* a `2xx` carrying `status: "failed"` or a `4xx` — cases where
+     the payment service understood the request and refused it. Nothing else.
    - unknown → booking **stays pending**, `502` to the caller; the reconciling
      sweep (below) resolves it. Never assume a timeout means "not charged."
+     **A `5xx` is unknown, not a rejection** (corrected 2026-08-25): payment can
+     crash after its INSERT commits, and the gateway returns its own `502`/`504`
+     when payment is slow or restarting. Both look identical to a clean refusal
+     at the HTTP layer, and both may have taken money.
 
 All pending→terminal transitions are guarded with `AND status='pending'`, so
 a booking the sweep already resolved can never be overridden or resurrected.
@@ -133,11 +138,14 @@ Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 | Hold expires during payment | Pending row already exists; constraint blocks rivals. |
 | Payment succeeds, confirm-update crashes | Booking stays `pending`; the reconciling sweep queries payment by idempotency key (= bookingId), finds `succeeded`, and **confirms** it — the user keeps the seat they paid for. |
 | Payment call times out (outcome unknown) | Booking stays `pending`, caller gets `502`; sweep reconciles: confirm if charged, cancel if not. No cancel-on-timeout, so no double charge on retry. |
+| Payment returns `5xx`, or the gateway returns a proxy error | Same as a timeout — treated as unknown. Booking stays `pending`, sweep decides from the payment record. Cancelling here would strand a real charge (next row). |
+| Booking is `cancelled` but a charge exists for its key | **Unreconciled — known gap.** The sweep only revisits `pending` rows, so nothing ever notices. Closing this needs a refund/void endpoint on payment plus a sweep over recently-cancelled bookings. Deferred; the `5xx`-is-unknown rule above removes the only path that reached it in practice. |
 | User abandons payment | Pending booking passes `expires_at`; sweep finds no payment for the key and cancels, freeing the seat. |
 | RabbitMQ down at publish | Event is lost (logged loudly); the connection retries forever so the window is brief. Accepted Phase 1 gap — the outbox pattern (Phase 3) makes publishes atomic with the booking write. |
 | Redis restarts (holds lost) | Multiple users may *believe* they hold; constraint picks one winner at insert. Overselling of holds possible, of bookings impossible. |
 | Redis down | Hold creation returns 503 (fail closed). Existing pending bookings unaffected. |
 | Double-publish / consumer replay | Notifications consumer must be idempotent (dedupe on bookingId). Formalized in Phase 3. |
+| RabbitMQ restarts under a live consumer | Notifications reports `degraded` for the duration and reconnects in-process (fixed 2026-08-25; it previously exited after 10 attempts and, worse, kept reporting `ok` while holding a dead connection). Covered by `tests/resilience.test.js`. Note the restart policy does not help here - the process never exited, it just stopped consuming. |
 
 ## Explicitly deferred
 
@@ -145,9 +153,24 @@ Seats LEFT JOIN active bookings, then overlay Redis holds (`MGET`). Returns
 - **Auth**: `userId` is a client-supplied header. Fake, fine for now.
 - **Seat seeding**: script/admin endpoint, not a product feature.
 - **Multi-seat bookings** (lock-ordering lessons) → after single-seat works.
+- **Refunds / voids** on the payment service, and the cancelled-but-charged
+  reconciliation that depends on them (see the failure-edge table).
 
 ## Definition of done for Phase 1
 
 The concurrency test: N parallel booking attempts for one seat → exactly one
 `201`, N−1 clean rejections, one row in `bookings`, one `booking.confirmed`
 event consumed. If that test flakes even once, the design is wrong.
+
+**Met 2026-08-25.** `tests/concurrency.test.js`, run against the real stack
+through the gateway. Both races are covered: N holds on one seat (Redis `NX`
+arbitrates) and N bookings from a caller who legitimately holds it (the partial
+unique index arbitrates, with Redis waving everyone through — the retry-storm
+and lost-hold shape). Clean at N=20 and N=75, repeated runs, no flakes.
+
+The failure edges are covered too, in `tests/recovery.test.js`: the payment
+container is stopped mid-flow so the gateway answers with a 5xx, and the sweep
+is then observed cancelling the booking when no charge exists and *confirming*
+it when one does. That second test is the one that matters — it is the
+"payment succeeds, confirm-update crashes" row of the table above, and it is
+what a cancel-on-ambiguity bug looks like from the outside.

@@ -9,6 +9,11 @@ const QUEUE = 'booking.confirmed';
 const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || '300', 10);
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
 const SWEEP_INTERVAL_MS = parseInt(process.env.SWEEP_INTERVAL_MS || '60000', 10);
+// How long to wait for the payment service before declaring the outcome
+// UNKNOWN. Must exceed the gateway's own proxy-error latency, or a real 5xx
+// arrives as a client-side abort instead of the 5xx it really is.
+const PAYMENT_TIMEOUT_MS = parseInt(process.env.PAYMENT_TIMEOUT_MS || '5000', 10);
+const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS || '3000', 10);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -211,7 +216,7 @@ app.post(
           idempotencyKey: bookingId,
           simulate: simulatePaymentFailure ? 'fail' : undefined,
         }),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(PAYMENT_TIMEOUT_MS),
       });
     } catch (err) {
       // UNKNOWN: timeout/network — the charge may exist server-side. Never
@@ -224,7 +229,19 @@ app.post(
       });
     }
     if (!resp.ok) {
-      // Definite rejection: payment service answered, no charge was made.
+      // 5xx is UNKNOWN, not a rejection. It covers payment crashing after its
+      // INSERT committed, and the gateway's own 502/504 when payment is slow or
+      // restarting — in both cases the charge may exist. Cancelling here would
+      // strand it: the sweep only revisits *pending* bookings, so a cancelled-
+      // but-charged seat is never reconciled. Leave it pending instead.
+      if (resp.status >= 500) {
+        console.error(`booking: payment outcome unknown for ${bookingId}: HTTP ${resp.status}`);
+        return res.status(502).json({
+          error: 'payment status unknown; booking will be resolved automatically',
+          bookingId,
+        });
+      }
+      // 4xx: payment service understood the request and refused it — no charge.
       await settleBooking(bookingId, 'cancelled');
       await releaseHold(eventId, seatId, userId);
       return res.status(502).json({ error: 'payment request rejected', bookingId });
@@ -367,23 +384,37 @@ function startSweep() {
 // down, so abandoning reconnection would silently drop every future event.
 async function connectQueue() {
   for (let attempt = 1; ; attempt++) {
+    let conn = null;
     try {
-      const conn = await amqp.connect(process.env.RABBITMQ_URL);
+      conn = await amqp.connect(process.env.RABBITMQ_URL);
+      // Attached immediately: an 'error' event with no listener would take the
+      // process down before setup finishes.
       conn.on('error', (err) => console.error('booking: RabbitMQ error:', err.message));
+
+      const ch = await conn.createChannel();
+      await ch.assertQueue(QUEUE, { durable: true });
+
+      // Only once the queue is asserted: a failure during setup is retried by
+      // this loop, and must not also spawn a second loop from here.
       conn.on('close', () => {
         channel = null;
         console.error('booking: RabbitMQ connection closed — reconnecting');
-        setTimeout(connectQueue, 3000);
+        setTimeout(connectQueue, RECONNECT_DELAY_MS);
       });
-      channel = await conn.createChannel();
-      await channel.assertQueue(QUEUE, { durable: true });
+
+      // Published to only after assertQueue, so /health never reports 'ok' for
+      // a channel that cannot yet accept a booking.confirmed.
+      channel = ch;
       console.log('booking: connected to RabbitMQ');
       return;
     } catch {
+      if (conn) await conn.close().catch(() => {});
       if (attempt === 1 || attempt % 10 === 0) {
-        console.log(`booking: RabbitMQ not ready (attempt ${attempt}), retrying in 3s`);
+        console.log(
+          `booking: RabbitMQ not ready (attempt ${attempt}), retrying in ${RECONNECT_DELAY_MS}ms`
+        );
       }
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, RECONNECT_DELAY_MS));
     }
   }
 }
