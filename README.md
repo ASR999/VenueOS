@@ -20,6 +20,20 @@ npm run dev
 Open http://localhost:5173 — browse events, hold a seat, pay (mock), get a
 confirmation. Aggregate service health lives at http://localhost:8080/health.
 
+## Accounts
+
+Browsing is open; holding or booking a seat needs an account. The app shows a
+sign-in / sign-up form first.
+
+```sh
+TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/signup   -H 'Content-Type: application/json'   -d '{"email":"you@example.com","password":"correct-horse-battery"}' | jq -r .token)
+
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/booking/bookings
+```
+
+Requests never carry a `userId`: every service verifies the JWT and reads the
+caller's id from it. `POST /api/catalog/events` needs a token too.
+
 ## Listing events
 
 `GET /api/catalog/events` returns **upcoming events only**, 20 at a time, with
@@ -55,6 +69,7 @@ No dependencies to install - `node:test` and `fetch` are built in.
 | `tests/payment.test.js` | Rejected payments free the seat; idempotency keys can't be charged twice. |
 | `tests/recovery.test.js` | Ambiguous payment outcomes stay pending, and the sweep confirms or cancels them from the payment record. Stops the payment container, so tests run serially. |
 | `tests/resilience.test.js` | Services survive their dependencies restarting: notifications reports degraded during a broker outage and reconnects in-process. Restarts shared containers. |
+| `tests/auth.test.js` | Signup/login, account enumeration, forged tokens, one user acting on another's seat or booking, and payment refusing user tokens. |
 | `tests/metrics.test.js` | Every service exposes metrics, route labels are patterns not ids, counters move, and metrics aren't publicly reachable. |
 | `tests/listing.test.js` | Event listing: upcoming-only by default, visible truncation, stable paging, clamped parameters. |
 | `tests/outbox.test.js` | The transactional outbox: events survive a broker outage and are relayed on reconnect; cancelled bookings emit nothing. Stops RabbitMQ. |

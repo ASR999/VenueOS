@@ -20,17 +20,14 @@ function psql(sql) {
 async function bookASeat(name) {
   const { event, seats } = await h.fixture(name);
   const seat = seats[0];
-  const userId = `${name}-user`;
   const hold = await h.req('POST', '/api/booking/holds', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(hold.status, 201);
   const booking = await h.req('POST', '/api/booking/bookings', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(booking.status, 201, booking.text);
   return booking.body.bookingId;
@@ -92,13 +89,11 @@ test('an event survives the broker being down and is relayed on reconnect', { ti
 test('a cancelled booking produces no event', { timeout: TIMEOUT }, async () => {
   const { event, seats } = await h.fixture('outbox-cancelled');
   const seat = seats[0];
-  const userId = 'outbox-cancelled-user';
 
-  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id, userId });
+  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id });
   const booking = await h.req('POST', '/api/booking/bookings', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
     simulatePaymentFailure: true,
   });
   assert.equal(booking.status, 402);

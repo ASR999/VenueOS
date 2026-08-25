@@ -2,6 +2,7 @@
 // stack through the gateway, exactly like a real client would — the tests know
 // nothing about service internals or databases.
 const { execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
@@ -10,12 +11,66 @@ const COMPOSE_ARGS = ['compose', '-f', 'docker-compose.yml', '-f', 'docker-compo
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Mints a service token by hand - HS256 with the shared dev secret, no library.
+// That the harness can do this at all IS the documented HS256 trade-off: one
+// shared key means anyone holding it can mint credentials any service trusts.
+// Under RS256 only the auth service could, and this helper would be impossible.
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-not-a-real-secret';
+const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+
+function serviceToken(name = 'test-harness') {
+  const header = b64url({ alg: 'HS256', typ: 'JWT' });
+  const now = Math.floor(Date.now() / 1000);
+  const payload = b64url({
+    sub: `service:${name}`,
+    svc: name,
+    iss: 'tickethub-auth',
+    iat: now,
+    exp: now + 300,
+  });
+  const signature = crypto
+    .createHmac('sha256', JWT_SECRET)
+    .update(`${header}.${payload}`)
+    .digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+// Signs up a throwaway user and returns their bearer token. Tests that care
+// about identity make their own; everything else shares one.
+async function signup(label = 'tester') {
+  const email = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.test`;
+  const res = await fetch(`${GATEWAY}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password: 'correct-horse-battery' }),
+  });
+  const body = await res.json();
+  if (res.status !== 201) throw new Error(`signup failed: ${res.status} ${JSON.stringify(body)}`);
+  return { token: body.token, userId: body.user.id, email };
+}
+
+// One shared identity for the many tests that just need *a* valid caller.
+let sharedUser = null;
+async function defaultUser() {
+  if (!sharedUser) sharedUser = await signup('shared');
+  return sharedUser;
+}
+
 // Never throws on a non-2xx: these tests assert on status codes, and a proxy
 // error page is a legitimate response to assert about.
-async function req(method, path, body) {
+//
+// `token` defaults to the shared test user, so existing tests read unchanged;
+// pass token: null to make a deliberately anonymous request.
+async function req(method, path, body, options = {}) {
+  const token =
+    'token' in options ? options.token : (await defaultUser()).token;
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(`${GATEWAY}${path}`, {
     method,
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -146,6 +201,9 @@ module.exports = {
   seats,
   fixture,
   notificationsLogCount,
+  signup,
+  defaultUser,
+  serviceToken,
   containerStartedAt,
   restartPolicy,
   exitCode,

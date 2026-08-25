@@ -4,6 +4,7 @@ const { createClient } = require('redis');
 const amqp = require('amqplib');
 const migrate = require('./migrate');
 const createMetrics = require('./metrics');
+const { requireAuth, serviceToken } = require('./auth');
 
 const PORT = process.env.PORT || 4002;
 const QUEUE = 'booking.confirmed';
@@ -90,16 +91,14 @@ const holdKey = (eventId, seatId) => `hold:${eventId}:${seatId}`;
 // Express 4 doesn't catch async rejections; every async route goes through this.
 const ah = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
-// Shared by every seat endpoint. Types matter: Redis stringifies values, so a
-// numeric userId would hold a seat it could never book ("42" !== 42).
+// Shared by every seat endpoint. userId is NOT accepted here: it comes from the
+// verified token, so a caller cannot act as anyone but themselves. Before auth,
+// this function validated a client-supplied userId - which is exactly how one
+// user could take another's seat.
 function validateIds(body) {
-  const { eventId, seatId, userId } = body || {};
-  if (
-    typeof eventId !== 'string' || !eventId ||
-    typeof seatId !== 'string' || !seatId ||
-    typeof userId !== 'string' || !userId
-  ) {
-    return 'eventId, seatId and userId are required strings';
+  const { eventId, seatId } = body || {};
+  if (typeof eventId !== 'string' || !eventId || typeof seatId !== 'string' || !seatId) {
+    return 'eventId and seatId are required strings';
   }
   if (!UUID_RE.test(seatId)) return 'seatId must be a UUID';
   return null;
@@ -152,10 +151,12 @@ app.get('/health', async (req, res) => {
 // atomic first-come-first-served decision; see DESIGN.md.
 app.post(
   '/holds',
+  requireAuth,
   ah(async (req, res) => {
     const invalid = validateIds(req.body);
     if (invalid) return res.status(400).json({ error: invalid });
-    const { eventId, seatId, userId } = req.body;
+    const { eventId, seatId } = req.body;
+    const userId = req.userId;
 
     const seat = await pool.query('SELECT 1 FROM seats WHERE id = $1 AND event_id = $2', [seatId, eventId]);
     if (seat.rowCount === 0) return res.status(404).json({ error: 'seat not found for this event' });
@@ -200,10 +201,12 @@ app.post(
 // Owner releases their hold early (picked a different seat, closed checkout).
 app.delete(
   '/holds',
+  requireAuth,
   ah(async (req, res) => {
     const invalid = validateIds(req.body);
     if (invalid) return res.status(400).json({ error: invalid });
-    const { eventId, seatId, userId } = req.body;
+    const { eventId, seatId } = req.body;
+    const userId = req.userId;
 
     const key = holdKey(eventId, seatId);
     const released = await redisCall(() =>
@@ -252,10 +255,12 @@ app.get(
 // the pending row itself is the lock.
 app.post(
   '/bookings',
+  requireAuth,
   ah(async (req, res) => {
     const invalid = validateIds(req.body);
     if (invalid) return res.status(400).json({ error: invalid });
-    const { eventId, seatId, userId, simulatePaymentFailure } = req.body;
+    const { eventId, seatId, simulatePaymentFailure } = req.body;
+    const userId = req.userId;
 
     // 1) Only the hold owner may book.
     const holder = await redisCall(() => redis.get(holdKey(eventId, seatId)));
@@ -295,7 +300,11 @@ app.post(
     try {
       resp = await fetch(`${GATEWAY_URL}/api/payment/payments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Booking is not a user; it authenticates as itself.
+          Authorization: `Bearer ${serviceToken('booking')}`,
+        },
         body: JSON.stringify({
           bookingId,
           amountCents: priceCents,
@@ -378,6 +387,7 @@ app.post(
 
 app.get(
   '/bookings/:id',
+  requireAuth,
   ah(async (req, res) => {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'invalid booking id' });
     const r = await pool.query(
@@ -386,7 +396,31 @@ app.get(
       [req.params.id]
     );
     if (r.rowCount === 0) return res.status(404).json({ error: 'booking not found' });
+    // 404, not 403: telling a stranger "that booking exists but isn't yours"
+    // confirms which ids are real. Someone else's booking simply isn't there.
+    if (r.rows[0].user_id !== req.userId) {
+      return res.status(404).json({ error: 'booking not found' });
+    }
     res.json(r.rows[0]);
+  })
+);
+
+// What the client needs to show a user their tickets - and to resolve the
+// "payment status unknown" case, which previously had no visible outcome.
+app.get(
+  '/bookings',
+  requireAuth,
+  ah(async (req, res) => {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.seat_id, b.event_id, b.status, b.payment_id, b.created_at,
+              s.label AS seat_label, s.price_cents
+       FROM bookings b JOIN seats s ON s.id = b.seat_id
+       WHERE b.user_id = $1
+       ORDER BY b.created_at DESC
+       LIMIT 50`,
+      [req.userId]
+    );
+    res.json({ bookings: rows });
   })
 );
 
@@ -519,6 +553,7 @@ async function sweepExpiredPendings() {
     let payment = null; // null = definitively no charge for this key
     try {
       const resp = await fetch(`${GATEWAY_URL}/api/payment/payments/key/${b.id}`, {
+        headers: { Authorization: `Bearer ${serviceToken('booking')}` },
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) payment = await resp.json();

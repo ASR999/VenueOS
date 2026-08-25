@@ -11,6 +11,7 @@ React client (Vite, :5173) → API gateway (Express proxy, :8080) → services:
 
 | Service       | Port | Datastore        | Character                                  |
 | ------------- | ---- | ---------------- | ------------------------------------------ |
+| auth          | 4005 | Postgres         | signup/login; issues the JWT everyone verifies |
 | catalog       | 4001 | MongoDB          | events/venues; read-heavy, cache-friendly  |
 | booking       | 4002 | Postgres + Redis | seat holds/reservations; transactional core |
 | payment       | 4003 | Postgres         | mock payments; idempotency                 |
@@ -65,6 +66,15 @@ cd client && npm install && npm run dev   # React app on :5173
 - Collection endpoints paginate and report the true total (`X-Total-Count`).
   Returning a truncated list with a 200 and no indication is how a real event
   went missing from the UI - found by clicking through it, not by a test.
+- **Identity comes from the token, never the request body.** `userId` is not an
+  accepted input anywhere; every service verifies the JWT itself and reads
+  `sub`. Trusting a gateway-injected header would be forgeable with one curl,
+  because every service port is published.
+- Reads are public (browsing needs no account); writes require a token. A
+  resource belonging to someone else answers **404, not 403** - a 403 confirms
+  the id is real.
+- Service-to-service calls carry a service token (`svc` claim), which is
+  distinct from a user token. Being signed in is not authority to charge.
 - Every service exposes `GET /metrics` for Prometheus, scraped directly on the
   compose network and never proxied publicly. Label values must be bounded -
   route *patterns* (`/bookings/:id`), never the URL, or every booking mints a
@@ -87,7 +97,10 @@ cd client && npm install && npm run dev   # React app on :5173
 - `GET /health` returns 503, not 200, when the service is degraded - including
   the gateway's aggregate, which is 200 only when every dependency is ok.
 - One Postgres container, but separate databases per service (`booking`,
-  `payment`) — created in `infra/postgres/init.sql`. Schema/migrations live
+  `payment`, `auth`) — created in `infra/postgres/init.sql`. **That script runs
+  only when the postgres volume is first created.** Adding a service database
+  means `docker compose down -v` (or creating it by hand); editing init.sql
+  alone silently does nothing, and the new service dies with `3D000`. Schema/migrations live
   with the owning service (tooling comes in Phase 1).
 - Same arrangement for Redis: one container, one logical DB per service.
   Booking owns DB 0 (seat holds), catalog owns DB 1 (read cache), notifications
@@ -121,6 +134,8 @@ cd client && npm install && npm run dev   # React app on :5173
 4. **Phase 4** (partly done) - Prometheus + Grafana landed 2026-08-25, behind a
    `monitoring` compose profile; `infra/prometheus/` and `infra/grafana/` hold
    the config and the provisioned dashboard. The AWS half is still open.
+   Auth landed 2026-08-25 as well (see below), which was listed under
+   "explicitly deferred" rather than in a phase.
    Original entry:
 4. **Phase 4** — AWS Free Plan deploy: EC2 + (ECS or k3s), SQS, Terraform,
    Prometheus/Grafana, CI/CD deploys.

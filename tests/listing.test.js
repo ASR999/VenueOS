@@ -23,13 +23,15 @@ async function list(query = '') {
 }
 
 async function createAt(name, startsAt) {
-  const res = await fetch(`${h.GATEWAY}/api/catalog/events`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, venue: 'Listing Arena', startsAt }),
+  // Through h.req, so it carries a token: creating an event is a write and
+  // writes require an account.
+  const res = await h.req('POST', '/api/catalog/events', {
+    name,
+    venue: 'Listing Arena',
+    startsAt,
   });
-  assert.equal(res.status, 201);
-  return res.json();
+  assert.equal(res.status, 201, `create failed: ${res.text}`);
+  return res.body;
 }
 
 test('truncation is visible instead of silent', { timeout: TIMEOUT }, async () => {

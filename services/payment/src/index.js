@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const migrate = require('./migrate');
 const createMetrics = require('./metrics');
+const { requireService } = require('./auth');
 
 const PORT = process.env.PORT || 4003;
 // Must stay under Docker's stop timeout (10s by default) or the container is
@@ -43,6 +44,7 @@ app.get('/health', async (req, res) => {
 // the failure path.
 app.post(
   '/payments',
+  requireService,
   ah(async (req, res) => {
     const { bookingId, amountCents, idempotencyKey, simulate } = req.body || {};
     if (!bookingId || !idempotencyKey || !Number.isInteger(amountCents) || amountCents <= 0) {
@@ -92,6 +94,7 @@ app.post(
 // payment outcomes (see DESIGN.md "The reconciling sweep").
 app.get(
   '/payments/key/:idempotencyKey',
+  requireService,
   ah(async (req, res) => {
     const r = await pool.query(
       'SELECT id, status FROM payments WHERE idempotency_key = $1',

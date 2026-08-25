@@ -66,7 +66,6 @@ test('Redis being down fails holds fast and closed, not 500 and not a hang', { t
     const hold = await h.req('POST', '/api/booking/holds', {
       eventId: event._id,
       seatId: seat.id,
-      userId: 'redis-down-user',
     });
     const elapsed = Date.now() - startedAt;
 
@@ -78,7 +77,6 @@ test('Redis being down fails holds fast and closed, not 500 and not a hang', { t
     const booking = await h.req('POST', '/api/booking/bookings', {
       eventId: event._id,
       seatId: seat.id,
-      userId: 'redis-down-user',
     });
     assert.equal(booking.status, 503);
 
@@ -92,7 +90,6 @@ test('Redis being down fails holds fast and closed, not 500 and not a hang', { t
   const recovered = await h.req('POST', '/api/booking/holds', {
     eventId: event._id,
     seatId: seat.id,
-    userId: 'redis-down-user',
   });
   assert.equal(recovered.status, 201, 'holds must work again once Redis is back');
 });

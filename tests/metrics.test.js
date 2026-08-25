@@ -50,12 +50,10 @@ test('every service exposes Prometheus metrics', { timeout: TIMEOUT }, async () 
 test('route labels are patterns, never raw ids', { timeout: TIMEOUT }, async () => {
   const { event, seats } = await h.fixture('metrics-cardinality');
   const seat = seats[0];
-  const userId = 'metrics-user';
-  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id, userId });
+  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id });
   const booking = await h.req('POST', '/api/booking/bookings', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   await h.req('GET', `/api/booking/bookings/${booking.body.bookingId}`);
 
@@ -75,19 +73,28 @@ test('booking and hold outcomes are counted', { timeout: TIMEOUT }, async () => 
 
   const { event, seats } = await h.fixture('metrics-counters');
   const seat = seats[0];
-  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id, userId: 'winner' });
-  // A second user loses the race for the same seat.
-  const loser = await h.req('POST', '/api/booking/holds', {
-    eventId: event._id,
-    seatId: seat.id,
-    userId: 'loser',
-  });
+  const winner = await h.signup('winner');
+  const loserUser = await h.signup('loser');
+  await h.req(
+    'POST',
+    '/api/booking/holds',
+    { eventId: event._id, seatId: seat.id },
+    { token: winner.token }
+  );
+  // A genuinely different user loses the race for the same seat.
+  const loser = await h.req(
+    'POST',
+    '/api/booking/holds',
+    { eventId: event._id, seatId: seat.id },
+    { token: loserUser.token }
+  );
   assert.equal(loser.status, 409);
-  const booking = await h.req('POST', '/api/booking/bookings', {
-    eventId: event._id,
-    seatId: seat.id,
-    userId: 'winner',
-  });
+  const booking = await h.req(
+    'POST',
+    '/api/booking/bookings',
+    { eventId: event._id, seatId: seat.id },
+    { token: winner.token }
+  );
   assert.equal(booking.status, 201);
 
   const after = await scrape(SERVICES.booking);

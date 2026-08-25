@@ -62,6 +62,7 @@ services:
       # Redis DB 1 - booking owns DB 0. Same container, separate logical
       # database, exactly like the shared Postgres with a database per service.
       CACHE_REDIS_URL: redis://redis:6379/1
+      JWT_SECRET: dev-only-not-a-real-secret
     ports:
       - "4001:4001"
     depends_on:
@@ -79,6 +80,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://rabbitmq:5672
       GATEWAY_URL: http://gateway:8080
+      JWT_SECRET: dev-only-not-a-real-secret
     ports:
       - "4002:4002"
     depends_on:
@@ -89,12 +91,30 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  auth:
+    build: ./services/auth
+    restart: unless-stopped
+    environment:
+      PORT: 4005
+      DATABASE_URL: postgres://dev:dev@postgres:5432/auth
+      # Dev-only shared secret. Every service verifies tokens with this same
+      # HS256 key, which also means any service could mint one - the trade-off
+      # is recorded in DESIGN.md. A real deploy uses RS256 and a real secret
+      # store, and this value never appears in a compose file.
+      JWT_SECRET: dev-only-not-a-real-secret
+    ports:
+      - "4005:4005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   payment:
     build: ./services/payment
     restart: unless-stopped
     environment:
       PORT: 4003
       DATABASE_URL: postgres://dev:dev@postgres:5432/payment
+      JWT_SECRET: dev-only-not-a-real-secret
     ports:
       - "4003:4003"
     depends_on:
@@ -125,6 +145,7 @@ services:
       RATE_LIMIT_WINDOW_MS: 60000
       RATE_LIMIT_MAX: 120
       CATALOG_URL: http://catalog:4001
+      AUTH_URL: http://auth:4005
       BOOKING_URL: http://booking:4002
       PAYMENT_URL: http://payment:4003
       NOTIFICATIONS_URL: http://notifications:4004
@@ -135,6 +156,7 @@ services:
       - booking
       - payment
       - notifications
+      - auth
 
   # Observability, off by default so `docker compose up -d` and CI stay lean:
   #   docker compose --profile monitoring up -d

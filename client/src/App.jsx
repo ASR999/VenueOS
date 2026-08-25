@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, getUserId } from './api.js';
+import { api, getUser, clearSession } from './api.js';
 import EventList from './components/EventList.jsx';
 import SeatGrid from './components/SeatGrid.jsx';
 import CheckoutPanel from './components/CheckoutPanel.jsx';
-
-const userId = getUserId();
+import AuthPanel from './components/AuthPanel.jsx';
 
 export default function App() {
+  const [user, setUser] = useState(getUser());
   const [events, setEvents] = useState(null);
   const [event, setEvent] = useState(null); // selected event
   const [seats, setSeats] = useState([]);
@@ -44,7 +44,7 @@ export default function App() {
       if (hold) await releaseHold(hold, true);
       const h = await api('/booking/holds', {
         method: 'POST',
-        body: JSON.stringify({ eventId: event._id, seatId: seat.id, userId }),
+        body: JSON.stringify({ eventId: event._id, seatId: seat.id }),
       });
       setHold({ seatId: seat.id, label: seat.label, priceCents: seat.priceCents, expiresAt: h.expiresAt });
       await refreshSeats(event._id);
@@ -59,7 +59,7 @@ export default function App() {
     try {
       await api('/booking/holds', {
         method: 'DELETE',
-        body: JSON.stringify({ eventId: event._id, seatId: h.seatId, userId }),
+        body: JSON.stringify({ eventId: event._id, seatId: h.seatId }),
       });
     } catch (e) {
       if (!silent) setError(e.message);
@@ -76,7 +76,6 @@ export default function App() {
         body: JSON.stringify({
           eventId: event._id,
           seatId: hold.seatId,
-          userId,
           simulatePaymentFailure: simulateFailure || undefined,
         }),
       });
@@ -93,6 +92,21 @@ export default function App() {
     }
   }
 
+  function signOut() {
+    clearSession();
+    setUser(null);
+    setEvent(null);
+    setHold(null);
+    setConfirmation(null);
+    setError(null);
+  }
+
+  // Any 401 means the stored token is no longer good - api() has already
+  // cleared it, so the UI has to stop pretending we are signed in.
+  useEffect(() => {
+    if (error && /token|authentication/i.test(error)) setUser(null);
+  }, [error]);
+
   function backToEvents() {
     if (hold) releaseHold(hold, true);
     setEvent(null);
@@ -100,11 +114,35 @@ export default function App() {
     setError(null);
   }
 
+  if (!user) {
+    return (
+      <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 720, margin: '2rem auto', padding: '0 1rem' }}>
+        <h1 style={{ margin: 0 }}>🎟️ TicketHub</h1>
+        <AuthPanel onAuthenticated={setUser} />
+      </main>
+    );
+  }
+
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 720, margin: '2rem auto', padding: '0 1rem' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <h1 style={{ margin: 0 }}>🎟️ TicketHub</h1>
-        <span style={{ color: '#999', fontSize: '0.85rem' }}>you are {userId}</span>
+        <span style={{ color: '#999', fontSize: '0.85rem' }}>
+          {user.email}{' '}
+          <button
+            onClick={signOut}
+            style={{
+              font: 'inherit',
+              border: 'none',
+              background: 'none',
+              color: '#1565c0',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            sign out
+          </button>
+        </span>
       </header>
 
       {error && (

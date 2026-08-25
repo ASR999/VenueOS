@@ -15,3 +15,4 @@ scrape_configs:
           - booking:4002
           - payment:4003
           - notifications:4004
+          - auth:4005

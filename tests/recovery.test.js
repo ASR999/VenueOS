@@ -19,12 +19,10 @@ test.before(async () => {
 async function bookAgainstDeadPayment(name) {
   const { event, seats } = await h.fixture(name);
   const seat = seats[0];
-  const userId = `${name}-user`;
 
   const hold = await h.req('POST', '/api/booking/holds', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(hold.status, 201);
 
@@ -34,7 +32,6 @@ async function bookAgainstDeadPayment(name) {
     booking = await h.req('POST', '/api/booking/bookings', {
       eventId: event._id,
       seatId: seat.id,
-      userId,
     });
   } finally {
     h.compose('start', 'payment');
@@ -69,7 +66,7 @@ async function bookAgainstDeadPayment(name) {
     timeoutMs: 60000,
   });
 
-  return { event, seat, userId, bookingId: booking.body.bookingId };
+  return { event, seat, bookingId: booking.body.bookingId };
 }
 
 test('unknown payment outcome with no charge: the sweep cancels and frees the seat', { timeout: TIMEOUT }, async () => {
@@ -95,11 +92,12 @@ test('unknown payment outcome WITH a charge: the sweep confirms, never cancels',
   const { event, seat, bookingId } = await bookAgainstDeadPayment('sweep-recover');
 
   // Stand in for the charge that went through before the response was lost.
-  const charge = await h.req('POST', '/api/payment/payments', {
-    bookingId,
-    amountCents: seat.priceCents,
-    idempotencyKey: bookingId,
-  });
+  const charge = await h.req(
+    'POST',
+    '/api/payment/payments',
+    { bookingId, amountCents: seat.priceCents, idempotencyKey: bookingId },
+    { token: h.serviceToken('test-harness') }
+  );
   assert.equal(charge.status, 201, `could not record the charge: ${charge.text}`);
 
   const settled = await h.waitFor(

@@ -13,13 +13,11 @@ test.before(async () => {
 test('a redelivered event does not send a second email', { timeout: TIMEOUT }, async () => {
   const { event, seats } = await h.fixture('idempotent-consumer');
   const seat = seats[0];
-  const userId = 'idempotent-user';
 
-  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id, userId });
+  await h.req('POST', '/api/booking/holds', { eventId: event._id, seatId: seat.id });
   const booking = await h.req('POST', '/api/booking/bookings', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(booking.status, 201);
   const { bookingId } = booking.body;

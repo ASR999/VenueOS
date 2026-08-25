@@ -14,6 +14,7 @@ let server = null;
 let shuttingDown = false;
 
 const services = {
+  auth: process.env.AUTH_URL || 'http://localhost:4005',
   catalog: process.env.CATALOG_URL || 'http://localhost:4001',
   booking: process.env.BOOKING_URL || 'http://localhost:4002',
   payment: process.env.PAYMENT_URL || 'http://localhost:4003',

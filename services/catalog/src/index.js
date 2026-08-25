@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { createClient } = require('redis');
 const createMetrics = require('./metrics');
+const { requireAuth } = require('./auth');
 
 const PORT = process.env.PORT || 4001;
 // Must stay under Docker's stop timeout (10s by default) or the container is
@@ -225,6 +226,7 @@ app.get(
 
 app.post(
   '/events',
+  requireAuth,
   ah(async (req, res) => {
     const { name, venue, startsAt, description } = req.body || {};
     if (typeof name !== 'string' || !name.trim()) {

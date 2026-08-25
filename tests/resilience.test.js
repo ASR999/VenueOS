@@ -45,19 +45,16 @@ test('a booking made after a broker outage still reaches the consumer', { timeou
 
   const { event, seats } = await h.fixture('post-outage');
   const seat = seats[0];
-  const userId = 'post-outage-user';
 
   const hold = await h.req('POST', '/api/booking/holds', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(hold.status, 201);
 
   const booking = await h.req('POST', '/api/booking/bookings', {
     eventId: event._id,
     seatId: seat.id,
-    userId,
   });
   assert.equal(booking.status, 201, `booking failed after the outage: ${booking.text}`);
 

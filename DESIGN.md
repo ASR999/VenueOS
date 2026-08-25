@@ -202,7 +202,19 @@ locking strategy is a decision this file owns.
 ## Explicitly deferred
 
 - ~~**Outbox pattern** for atomically-published events~~ — done 2026-08-25; see the failure-edge table and `migrations/003_outbox.sql`.
-- **Auth**: `userId` is a client-supplied header. Fake, fine for now.
+- ~~**Auth**: `userId` is a client-supplied header~~ — done 2026-08-25. A fifth
+  service (`auth`, :4005, its own Postgres DB) issues HS256 JWTs; scrypt for
+  password hashing, via `node:crypto` rather than a dependency. Every service
+  verifies signatures itself, so nothing trusts the network. `userId` is no
+  longer an accepted input anywhere.
+
+  **Still open, deliberately:** HS256 uses one shared secret, so any service
+  holding it can mint a token every other service trusts - including a user
+  token. RS256, with the private key confined to the auth service and everyone
+  else verifying against the public key, removes that. The test harness minting
+  its own service tokens in `tests/helpers.js` is this weakness made visible.
+  Also open: token revocation (a stolen token is valid until it expires), and
+  roles - any signed-in user can currently create an event.
 - **Seat seeding**: script/admin endpoint, not a product feature.
 - **Multi-seat bookings** (lock-ordering lessons) → after single-seat works.
 - **Refunds / voids** on the payment service, and the cancelled-but-charged
