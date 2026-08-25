@@ -1,8 +1,8 @@
 {
-  "name": "tickethub",
+  "name": "venueos",
   "version": "0.1.0",
   "private": true,
-  "description": "Integration tests for the TicketHub stack (no dependencies: node:test + fetch).",
+  "description": "Integration tests for the VenueOS stack (no dependencies: node:test + fetch).",
   "scripts": {
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\""
   }

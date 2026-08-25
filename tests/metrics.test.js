@@ -68,8 +68,8 @@ test('route labels are patterns, never raw ids', { timeout: TIMEOUT }, async () 
 
 test('booking and hold outcomes are counted', { timeout: TIMEOUT }, async () => {
   const before = await scrape(SERVICES.booking);
-  const confirmedBefore = value(before.body, 'tickethub_bookings_total', 'status="confirmed"') || 0;
-  const lostBefore = value(before.body, 'tickethub_holds_total', 'outcome="lost"') || 0;
+  const confirmedBefore = value(before.body, 'venueos_bookings_total', 'status="confirmed"') || 0;
+  const lostBefore = value(before.body, 'venueos_holds_total', 'outcome="lost"') || 0;
 
   const { event, seats } = await h.fixture('metrics-counters');
   const seat = seats[0];
@@ -99,24 +99,24 @@ test('booking and hold outcomes are counted', { timeout: TIMEOUT }, async () => 
 
   const after = await scrape(SERVICES.booking);
   assert.equal(
-    value(after.body, 'tickethub_bookings_total', 'status="confirmed"'),
+    value(after.body, 'venueos_bookings_total', 'status="confirmed"'),
     confirmedBefore + 1
   );
-  assert.equal(value(after.body, 'tickethub_holds_total', 'outcome="lost"'), lostBefore + 1);
+  assert.equal(value(after.body, 'venueos_holds_total', 'outcome="lost"'), lostBefore + 1);
 });
 
 test('outbox backlog is reported as a gauge', { timeout: TIMEOUT }, async () => {
   const m = await scrape(SERVICES.booking);
-  const backlog = value(m.body, 'tickethub_outbox_backlog');
+  const backlog = value(m.body, 'venueos_outbox_backlog');
   assert.ok(Number.isFinite(backlog), 'the backlog gauge should be present');
   assert.ok(backlog >= 0);
 });
 
 test('the cache counter tracks hits and misses', { timeout: TIMEOUT }, async () => {
-  const before = value((await scrape(SERVICES.catalog)).body, 'tickethub_cache_total', 'result="hit"') || 0;
+  const before = value((await scrape(SERVICES.catalog)).body, 'venueos_cache_total', 'result="hit"') || 0;
   await fetch(`${h.GATEWAY}/api/catalog/events`); // warm
   await fetch(`${h.GATEWAY}/api/catalog/events`); // hit
-  const after = value((await scrape(SERVICES.catalog)).body, 'tickethub_cache_total', 'result="hit"');
+  const after = value((await scrape(SERVICES.catalog)).body, 'venueos_cache_total', 'result="hit"');
   assert.ok(after > before, 'a repeated read should register a cache hit');
 });
 

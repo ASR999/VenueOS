@@ -32,7 +32,7 @@ cache.on('error', (err) => console.error('catalog: cache error:', err.message));
 
 const metrics = createMetrics('catalog');
 const cacheTotal = new metrics.client.Counter({
-  name: 'tickethub_cache_total',
+  name: 'venueos_cache_total',
   help: 'Catalog cache lookups by result',
   labelNames: ['result'], // hit | miss | bypass
   registers: [metrics.register],

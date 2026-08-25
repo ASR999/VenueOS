@@ -1,3 +1,5 @@
+name: venueos
+
 services:
   mongo:
     image: mongo:7

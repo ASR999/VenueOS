@@ -1,0 +1,219 @@
+@import 'tailwindcss';
+
+/* Dark mode driven by an attribute rather than the OS alone, so the toggle can
+   override the system preference. main.jsx sets data-theme before React paints,
+   which is what stops the light theme flashing on a dark-mode load. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Semantic tokens. Components never name a raw colour - they say `bg-surface`
+   or `text-muted`, and the whole theme swaps by redefining these six-ish
+   variables below. That is the entire dark mode implementation. */
+@theme inline {
+  --color-canvas: var(--c-canvas);
+  --color-surface: var(--c-surface);
+  --color-elevated: var(--c-elevated);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-ink: var(--c-ink);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-brand: var(--c-brand);
+  --color-brand-ink: var(--c-brand-ink);
+  --color-success: var(--c-success);
+  --color-danger: var(--c-danger);
+  --color-warn: var(--c-warn);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --c-canvas: #f5f6f8;
+  --c-surface: #ffffff;
+  --c-elevated: #ffffff;
+  --c-line: #e4e7ec;
+  --c-line-strong: #d0d5dd;
+  --c-ink: #0f1729;
+  --c-muted: #5b6472;
+  --c-faint: #8b94a3;
+  --c-brand: #5b5bd6;
+  --c-brand-ink: #ffffff;
+  --c-success: #16a34a;
+  --c-danger: #dc2626;
+  --c-warn: #b45309;
+
+  --grad-brand: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 4px 12px -2px rgb(16 24 40 / 0.06);
+  --shadow-lift: 0 4px 8px -2px rgb(16 24 40 / 0.08), 0 16px 32px -8px rgb(16 24 40 / 0.14);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --c-canvas: #0a0c10;
+  --c-surface: #12151c;
+  --c-elevated: #171b24;
+  --c-line: #232936;
+  --c-line-strong: #333b4a;
+  --c-ink: #e8ecf3;
+  --c-muted: #97a1b2;
+  --c-faint: #6b7686;
+  --c-brand: #7c7cf0;
+  --c-brand-ink: #ffffff;
+  --c-success: #22c55e;
+  --c-danger: #f87171;
+  --c-warn: #fbbf24;
+
+  --grad-brand: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px -2px rgb(0 0 0 / 0.35);
+  --shadow-lift: 0 4px 8px -2px rgb(0 0 0 / 0.5), 0 16px 32px -8px rgb(0 0 0 / 0.55);
+}
+
+@layer base {
+  html {
+    /* 15px base: dense enough to hold real information, large enough to read. */
+    font-size: 15px;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    margin: 0;
+  }
+
+  /* Visible focus for keyboard users, invisible for mouse users. */
+  :focus-visible {
+    outline: 2px solid var(--c-brand);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--c-brand) 28%, transparent);
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface border-line rounded-xl border;
+    box-shadow: var(--shadow-card);
+  }
+
+  .card-lift {
+    transition:
+      transform 140ms ease,
+      box-shadow 140ms ease,
+      border-color 140ms ease;
+  }
+  .card-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lift);
+    @apply border-line-strong;
+  }
+
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg border
+      border-transparent px-4 py-2 text-sm font-medium whitespace-nowrap;
+    transition:
+      filter 120ms ease,
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .btn-primary {
+    background: var(--grad-brand);
+    @apply text-brand-ink;
+    box-shadow: 0 1px 2px rgb(16 24 40 / 0.1);
+  }
+  .btn-primary:not(:disabled):hover {
+    filter: brightness(1.08);
+  }
+
+  .btn-ghost {
+    @apply bg-surface border-line text-ink border;
+  }
+  .btn-ghost:not(:disabled):hover {
+    @apply bg-canvas border-line-strong;
+  }
+
+  .btn-quiet {
+    @apply text-muted bg-transparent;
+  }
+  .btn-quiet:not(:disabled):hover {
+    @apply bg-canvas text-ink;
+  }
+
+  .input {
+    @apply bg-surface border-line text-ink w-full rounded-lg border px-3 py-2 text-sm;
+    transition:
+      border-color 120ms ease,
+      box-shadow 120ms ease;
+  }
+  .input::placeholder {
+    @apply text-faint;
+  }
+  .input:focus {
+    @apply border-brand outline-none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-brand) 18%, transparent);
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  /* Translucent sticky header. Written by hand rather than as `bg-surface/80`:
+     an opacity modifier on a token whose value is a raw var() is silently
+     dropped by Tailwind, which leaves the header opaque and makes the
+     backdrop-blur behind it do nothing at all. */
+  .app-header {
+    background: color-mix(in srgb, var(--c-surface) 82%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(12px);
+    backdrop-filter: saturate(180%) blur(12px);
+  }
+
+  /* The gradient hairline along the top of a card - the main piece of
+     "elevated" character, used sparingly so it still reads as an accent. */
+  .accent-rule {
+    background: var(--grad-brand);
+    @apply h-1 w-full rounded-t-xl;
+  }
+}
+
+/* Seats are the densest thing on screen and get their own small system. */
+@layer components {
+  .seat {
+    @apply relative flex items-center justify-center rounded-md border text-[11px] font-medium
+      tabular-nums select-none;
+    inline-size: 2.15rem;
+    block-size: 1.9rem;
+    transition:
+      transform 100ms ease,
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+  .seat-available {
+    @apply bg-surface border-line-strong text-muted cursor-pointer;
+  }
+  .seat-available:hover {
+    @apply border-brand text-ink;
+    transform: translateY(-1px) scale(1.06);
+  }
+  .seat-held {
+    @apply border-line text-faint cursor-not-allowed;
+    background: color-mix(in srgb, var(--c-warn) 16%, var(--c-surface));
+    border-color: color-mix(in srgb, var(--c-warn) 40%, var(--c-line));
+  }
+  .seat-booked {
+    @apply border-line text-faint cursor-not-allowed;
+    background: color-mix(in srgb, var(--c-ink) 12%, var(--c-canvas));
+  }
+  .seat-mine {
+    @apply text-brand-ink cursor-pointer border-transparent;
+    background: var(--grad-brand);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-brand) 25%, transparent);
+  }
+}

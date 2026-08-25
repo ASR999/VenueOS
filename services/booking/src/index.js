@@ -32,19 +32,19 @@ const metrics = createMetrics('booking');
 // Domain metrics. The default process metrics tell you the service is alive;
 // these tell you whether it is doing its job.
 const holdsTotal = new metrics.client.Counter({
-  name: 'tickethub_holds_total',
+  name: 'venueos_holds_total',
   help: 'Seat hold attempts by outcome',
   labelNames: ['outcome'], // won | lost | booked | unavailable
   registers: [metrics.register],
 });
 const bookingsTotal = new metrics.client.Counter({
-  name: 'tickethub_bookings_total',
+  name: 'venueos_bookings_total',
   help: 'Booking attempts by final status',
   labelNames: ['status'], // confirmed | cancelled | conflict | unknown
   registers: [metrics.register],
 });
 const sweepRecoveriesTotal = new metrics.client.Counter({
-  name: 'tickethub_sweep_recoveries_total',
+  name: 'venueos_sweep_recoveries_total',
   help: 'Paid bookings the reconciling sweep recovered',
   registers: [metrics.register],
 });
@@ -52,7 +52,7 @@ const sweepRecoveriesTotal = new metrics.client.Counter({
 // an event. Steady non-zero means the relay is stuck; a spike then decay is a
 // broker outage healing itself.
 new metrics.client.Gauge({
-  name: 'tickethub_outbox_backlog',
+  name: 'venueos_outbox_backlog',
   help: 'Outbox rows not yet published',
   registers: [metrics.register],
   async collect() {

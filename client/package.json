@@ -1,5 +1,5 @@
 {
-  "name": "tickethub-client",
+  "name": "venueos-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,9 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.3.1",
+    "tailwindcss": "^4.3.3",
     "vite": "^5.4.0"
   }
 }

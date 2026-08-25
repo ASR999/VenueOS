@@ -1,6 +1,6 @@
 // Thin fetch wrapper for the API gateway (Vite proxies /api → :8080).
-const TOKEN_KEY = 'tickethub-token';
-const USER_KEY = 'tickethub-user';
+const TOKEN_KEY = 'venueos-token';
+const USER_KEY = 'venueos-user';
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);

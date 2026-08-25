@@ -23,7 +23,7 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'authentication required' });
   }
   try {
-    const claims = jwt.verify(header.slice(7), JWT_SECRET, { issuer: 'tickethub-auth' });
+    const claims = jwt.verify(header.slice(7), JWT_SECRET, { issuer: 'venueos-auth' });
     req.userId = claims.sub;
     req.userEmail = claims.email;
     next();
@@ -45,7 +45,7 @@ function requireAuth(req, res, next) {
 function serviceToken(name) {
   return jwt.sign({ sub: `service:${name}`, svc: name }, JWT_SECRET, {
     expiresIn: '5m',
-    issuer: 'tickethub-auth',
+    issuer: 'venueos-auth',
   });
 }
 
@@ -55,7 +55,7 @@ function requireService(req, res, next) {
     return res.status(401).json({ error: 'authentication required' });
   }
   try {
-    const claims = jwt.verify(header.slice(7), JWT_SECRET, { issuer: 'tickethub-auth' });
+    const claims = jwt.verify(header.slice(7), JWT_SECRET, { issuer: 'venueos-auth' });
     if (!claims.svc) return res.status(403).json({ error: 'service credentials required' });
     req.serviceName = claims.svc;
     next();

@@ -1,66 +1,112 @@
-const SEAT_STYLE = {
-  available: { background: '#e8f5e9', border: '1px solid #a5d6a7', cursor: 'pointer' },
-  held: { background: '#eee', border: '1px solid #ccc', color: '#999', cursor: 'not-allowed' },
-  booked: { background: '#333', border: '1px solid #333', color: '#fff', cursor: 'not-allowed' },
-  mine: { background: '#c8e6c9', border: '2px solid #2e7d32', cursor: 'pointer', fontWeight: 700 },
-};
-
-export default function SeatGrid({ seats, myHoldSeatId, onSeatClick }) {
-  // Group "A-1".."A-10" into row A, etc.
-  const rows = {};
+// The seat map owns the width in the split-pane layout. Rows are laid out with
+// an aisle down the middle so the shape reads as a room rather than a table.
+export default function SeatGrid({ seats, myHoldSeatId, onSeatClick, busy }) {
+  const rows = new Map();
   for (const seat of seats) {
     const row = seat.label.split('-')[0];
-    (rows[row] = rows[row] || []).push(seat);
+    if (!rows.has(row)) rows.set(row, []);
+    rows.get(row).push(seat);
+  }
+  for (const list of rows.values()) {
+    list.sort((a, b) => Number(a.label.split('-')[1]) - Number(b.label.split('-')[1]));
   }
 
+  const counts = seats.reduce(
+    (acc, s) => ({ ...acc, [s.status]: (acc[s.status] || 0) + 1 }),
+    {}
+  );
+
   return (
-    <div>
-      <div style={{ display: 'flex', gap: '1rem', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
-        <Legend style={SEAT_STYLE.available} label="available" />
-        <Legend style={SEAT_STYLE.held} label="held" />
-        <Legend style={SEAT_STYLE.booked} label="booked" />
-        <Legend style={SEAT_STYLE.mine} label="your hold" />
-      </div>
-      <div style={{ textAlign: 'center', color: '#999', letterSpacing: 4, marginBottom: 8 }}>
-        STAGE
-      </div>
-      {Object.entries(rows).map(([row, rowSeats]) => (
-        <div key={row} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
-          <span style={{ width: 16, color: '#999', fontSize: '0.8rem' }}>{row}</span>
-          {rowSeats.map((seat) => {
-            const mine = seat.id === myHoldSeatId;
-            const style = mine ? SEAT_STYLE.mine : SEAT_STYLE[seat.status];
-            const clickable = mine || seat.status === 'available';
-            return (
-              <button
-                key={seat.id}
-                title={`${seat.label} — $${(seat.priceCents / 100).toFixed(2)} (${mine ? 'your hold' : seat.status})`}
-                onClick={() => clickable && onSeatClick(seat)}
-                disabled={!clickable}
-                style={{
-                  width: 44,
-                  height: 36,
-                  borderRadius: 6,
-                  font: 'inherit',
-                  fontSize: '0.75rem',
-                  ...style,
-                }}
-              >
-                {seat.label.split('-')[1]}
-              </button>
-            );
-          })}
+    <section className="card overflow-hidden">
+      <div className="border-line flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
+        <div className="flex flex-wrap items-center gap-4">
+          <Legend className="seat-available" label="Available" count={counts.available || 0} />
+          <Legend className="seat-held" label="Held" count={counts.held || 0} />
+          <Legend className="seat-booked" label="Booked" count={counts.booked || 0} />
+          <Legend className="seat-mine" label="Your hold" />
         </div>
-      ))}
-    </div>
+        <span className="text-faint text-xs tabular-nums">{seats.length} seats</span>
+      </div>
+
+      <div className="overflow-x-auto px-5 py-8">
+        <div className="mx-auto w-fit min-w-full">
+          <div className="mb-8 flex flex-col items-center gap-2">
+            <div
+              className="h-1.5 w-full max-w-2xl rounded-full"
+              style={{ background: 'var(--grad-brand)' }}
+            />
+            <span className="text-faint text-[10px] font-medium tracking-[0.3em] uppercase">
+              Stage
+            </span>
+          </div>
+
+          <div className="flex flex-col items-center gap-2">
+            {[...rows.entries()].map(([row, rowSeats]) => {
+              const half = Math.ceil(rowSeats.length / 2);
+              return (
+                <div key={row} className="flex items-center gap-3">
+                  <span className="text-faint w-4 text-right text-[11px] font-medium tabular-nums">
+                    {row}
+                  </span>
+                  <div className="flex gap-1.5">
+                    {rowSeats.slice(0, half).map((seat) => (
+                      <Seat
+                        key={seat.id}
+                        seat={seat}
+                        mine={seat.id === myHoldSeatId}
+                        busy={busy}
+                        onClick={onSeatClick}
+                      />
+                    ))}
+                  </div>
+                  <div className="w-6" aria-hidden />
+                  <div className="flex gap-1.5">
+                    {rowSeats.slice(half).map((seat) => (
+                      <Seat
+                        key={seat.id}
+                        seat={seat}
+                        mine={seat.id === myHoldSeatId}
+                        busy={busy}
+                        onClick={onSeatClick}
+                      />
+                    ))}
+                  </div>
+                  <span className="text-faint w-4 text-[11px] font-medium tabular-nums">{row}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
-function Legend({ style, label }) {
+function Seat({ seat, mine, busy, onClick }) {
+  const clickable = !busy && (mine || seat.status === 'available');
+  const cls = mine ? 'seat-mine' : `seat-${seat.status}`;
+  const price = `$${(seat.priceCents / 100).toFixed(2)}`;
+
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <span style={{ width: 14, height: 14, borderRadius: 3, display: 'inline-block', ...style }} />
+    <button
+      type="button"
+      disabled={!clickable}
+      onClick={() => clickable && onClick(seat)}
+      title={`${seat.label} · ${price} · ${mine ? 'your hold' : seat.status}`}
+      aria-label={`Seat ${seat.label}, ${price}, ${mine ? 'your hold' : seat.status}`}
+      className={`seat ${cls}`}
+    >
+      {seat.label.split('-')[1]}
+    </button>
+  );
+}
+
+function Legend({ className, label, count }) {
+  return (
+    <span className="text-muted flex items-center gap-1.5 text-xs">
+      <span className={`${className} !size-3.5 !rounded-[4px]`} style={{ boxShadow: 'none' }} />
       {label}
+      {count !== undefined && <span className="text-faint tabular-nums">({count})</span>}
     </span>
   );
 }

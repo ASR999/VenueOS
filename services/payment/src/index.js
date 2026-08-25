@@ -11,7 +11,7 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 
 
 const metrics = createMetrics('payment');
 const paymentsTotal = new metrics.client.Counter({
-  name: 'tickethub_payments_total',
+  name: 'venueos_payments_total',
   help: 'Payment requests by outcome',
   labelNames: ['status'], // succeeded | failed | replay | mismatch
   registers: [metrics.register],

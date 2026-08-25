@@ -33,7 +33,7 @@ let shuttingDown = false;
 
 const metrics = createMetrics('notifications');
 const notificationsTotal = new metrics.client.Counter({
-  name: 'tickethub_notifications_total',
+  name: 'venueos_notifications_total',
   help: 'Consumed booking.confirmed events by outcome',
   labelNames: ['outcome'], // sent | duplicate | unparseable
   registers: [metrics.register],

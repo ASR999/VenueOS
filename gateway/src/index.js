@@ -28,7 +28,7 @@ const metrics = createMetrics('gateway', (req) => {
   return segments.length ? `/${segments.join('/')}` : '/';
 });
 const rateLimitedTotal = new metrics.client.Counter({
-  name: 'tickethub_rate_limited_total',
+  name: 'venueos_rate_limited_total',
   help: 'Requests rejected by the rate limiter',
   registers: [metrics.register],
 });

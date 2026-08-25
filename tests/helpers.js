@@ -24,7 +24,7 @@ function serviceToken(name = 'test-harness') {
   const payload = b64url({
     sub: `service:${name}`,
     svc: name,
-    iss: 'tickethub-auth',
+    iss: 'venueos-auth',
     iat: now,
     exp: now + 300,
   });

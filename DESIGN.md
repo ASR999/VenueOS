@@ -159,9 +159,9 @@ Instrumenting the hold path contradicted the story above, and the numbers are
 worth keeping. Over a flash-sale run - 50 VUs, 20 seats, 2,149 attempts:
 
 ```
-tickethub_holds_total{outcome="won"}     22
-tickethub_holds_total{outcome="lost"}     1     <- genuine Redis NX races
-tickethub_holds_total{outcome="booked"} 2129    <- rejected by the Postgres pre-check
+venueos_holds_total{outcome="won"}     22
+venueos_holds_total{outcome="lost"}     1     <- genuine Redis NX races
+venueos_holds_total{outcome="booked"} 2129    <- rejected by the Postgres pre-check
 ```
 
 k6 counted 2,129 "holds lost", which reads like the Redis layer absorbing a

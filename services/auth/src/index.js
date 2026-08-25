@@ -22,7 +22,7 @@ if (!JWT_SECRET) {
 
 const metrics = createMetrics('auth');
 const authAttempts = new metrics.client.Counter({
-  name: 'tickethub_auth_attempts_total',
+  name: 'venueos_auth_attempts_total',
   help: 'Authentication attempts by action and outcome',
   labelNames: ['action', 'outcome'], // signup|login x success|failure
   registers: [metrics.register],
@@ -54,7 +54,7 @@ function issueToken(user) {
   // caller's identity. Nothing else in the system may set it.
   return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, {
     expiresIn: TOKEN_TTL,
-    issuer: 'tickethub-auth',
+    issuer: 'venueos-auth',
   });
 }
 
@@ -137,7 +137,7 @@ app.get(
     const token = header.startsWith('Bearer ') ? header.slice(7) : null;
     if (!token) return res.status(401).json({ error: 'authentication required' });
     try {
-      const claims = jwt.verify(token, JWT_SECRET, { issuer: 'tickethub-auth' });
+      const claims = jwt.verify(token, JWT_SECRET, { issuer: 'venueos-auth' });
       res.json({ id: claims.sub, email: claims.email });
     } catch {
       res.status(401).json({ error: 'invalid or expired token' });

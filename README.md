@@ -1,4 +1,4 @@
-# TicketHub
+# VenueOS
 
 Event ticket booking platform built as a microservices learning project
 (system design + DevOps, entirely free to run).
@@ -98,7 +98,7 @@ docker compose --profile monitoring up -d
 - Grafana: http://localhost:3000 (no login - anonymous admin, local only)
 - Prometheus: http://localhost:9090
 
-The **TicketHub overview** dashboard is provisioned automatically. Run a load
+The **VenueOS overview** dashboard is provisioned automatically. Run a load
 test with it open and you can watch seat contention, the outbox backlog, and
 p95 latency move in real time.
 
@@ -108,13 +108,13 @@ Those endpoints are deliberately **not** reachable through the gateway -
 
 | Metric | What it tells you |
 | --- | --- |
-| `tickethub_holds_total{outcome}` | won / lost / booked - where hold attempts actually die |
-| `tickethub_bookings_total{status}` | confirmed / cancelled / conflict / unknown |
-| `tickethub_outbox_backlog` | events owed to the broker; should be 0 |
-| `tickethub_cache_total{result}` | catalog cache hit / miss / bypass |
-| `tickethub_notifications_total{outcome}` | sent vs duplicates suppressed |
-| `tickethub_payments_total{status}` | includes `replay`, i.e. idempotency absorbing retries |
-| `tickethub_sweep_recoveries_total` | paid bookings the sweep rescued |
+| `venueos_holds_total{outcome}` | won / lost / booked - where hold attempts actually die |
+| `venueos_bookings_total{status}` | confirmed / cancelled / conflict / unknown |
+| `venueos_outbox_backlog` | events owed to the broker; should be 0 |
+| `venueos_cache_total{result}` | catalog cache hit / miss / bypass |
+| `venueos_notifications_total{outcome}` | sent vs duplicates suppressed |
+| `venueos_payments_total{status}` | includes `replay`, i.e. idempotency absorbing retries |
+| `venueos_sweep_recoveries_total` | paid bookings the sweep rescued |
 
 ## Load tests
 

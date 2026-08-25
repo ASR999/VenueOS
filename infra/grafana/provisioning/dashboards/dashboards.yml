@@ -1,6 +1,6 @@
 apiVersion: 1
 providers:
-  - name: TicketHub
+  - name: VenueOS
     orgId: 1
     folder: ''
     type: file

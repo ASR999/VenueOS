@@ -1,4 +1,4 @@
-# TicketHub — event ticket booking platform (learning project)
+# VenueOS — event ticket booking platform (learning project)
 
 A learning project for system design + DevOps, built as microservices from day
 one, deliberately. Everything must stay completely free: open-source containers
