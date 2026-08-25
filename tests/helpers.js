@@ -181,6 +181,20 @@ async function serviceHealth(name) {
   return (body && body.services && body.services[name]) || { status: 'unreachable' };
 }
 
+// waitForStack only waits for each service's `status`, and an optional
+// dependency deliberately does not affect status - a dead cache must not make
+// catalog unhealthy. So after Redis restarts, waitForStack returns while
+// catalog's cache client is still reconnecting, and a cache assertion made in
+// that window sees a correct BYPASS and fails. Tests that assert on caching
+// have to wait for the real thing.
+async function waitForCache(timeoutMs = 30000) {
+  await waitFor(async () => (await serviceHealth('catalog')).cache === 'ok', {
+    label: "catalog's cache to reconnect",
+    timeoutMs,
+    intervalMs: 250,
+  });
+}
+
 // How many times the notifications consumer logged this bookingId. bookingIds
 // are UUIDs, so a substring match over the whole log is exact.
 function notificationsLogCount(needle) {
@@ -208,4 +222,5 @@ module.exports = {
   restartPolicy,
   exitCode,
   serviceHealth,
+  waitForCache,
 };

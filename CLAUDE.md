@@ -79,6 +79,12 @@ cd client && npm install && npm run dev   # React app on :5173
   compose network and never proxied publicly. Label values must be bounded -
   route *patterns* (`/bookings/:id`), never the URL, or every booking mints a
   new time series.
+- A service's health `status` covers only its load-bearing dependencies;
+  optional ones (catalog's cache) are reported but excluded, since a dead cache
+  must not make the service unhealthy. **Tests must account for that**: waiting
+  on `status` returns before an optional dependency has reconnected, so a test
+  asserting on caching has to wait for `cache: 'ok'` itself. That gap is ~1.7s
+  after a Redis restart, and it is how a test passed locally and failed on CI.
 - Every service exposes `GET /health` reporting its own dependencies. Health
   must be derived from live state (e.g. `channel !== null`), never a flag set
   once at startup - a health check that cannot go from ok back to degraded is

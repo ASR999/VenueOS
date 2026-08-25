@@ -113,6 +113,9 @@ test('outbox backlog is reported as a gauge', { timeout: TIMEOUT }, async () => 
 });
 
 test('the cache counter tracks hits and misses', { timeout: TIMEOUT }, async () => {
+  // Cheap insurance: this file currently runs after the one that restarts
+  // Redis, but that ordering is incidental and shouldn't be load-bearing.
+  await h.waitForCache();
   const before = value((await scrape(SERVICES.catalog)).body, 'venueos_cache_total', 'result="hit"') || 0;
   await fetch(`${h.GATEWAY}/api/catalog/events`); // warm
   await fetch(`${h.GATEWAY}/api/catalog/events`); // hit

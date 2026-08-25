@@ -90,6 +90,10 @@ test('catalog keeps serving when the cache is gone', { timeout: TIMEOUT }, async
   }
 
   await h.waitForStack();
+  // Leave the world as we found it. Without this the next test inherits a
+  // still-reconnecting cache and sees BYPASS where it expects HIT - which is
+  // exactly how this failed on CI and passed locally.
+  await h.waitForCache();
   assert.equal((await getWithCacheHeader(`/api/catalog/events/${event._id}`)).status, 200);
 });
 
@@ -118,6 +122,9 @@ test('search finds events by name, venue and description', { timeout: TIMEOUT },
 });
 
 test('an empty q falls back to the cached list', { timeout: TIMEOUT }, async () => {
+  // Establish the precondition rather than assume it: with no cache, BYPASS is
+  // the correct answer and this test would be asserting the wrong thing.
+  await h.waitForCache();
   await getWithCacheHeader('/api/catalog/events?q=');
   const again = await getWithCacheHeader('/api/catalog/events?q=');
   assert.equal(again.cache, 'HIT', 'a blank query is the plain list, and should still be cached');
