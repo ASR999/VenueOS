@@ -20,6 +20,22 @@ npm run dev
 Open http://localhost:5173 — browse events, hold a seat, pay (mock), get a
 confirmation. Aggregate service health lives at http://localhost:8080/health.
 
+## Listing events
+
+`GET /api/catalog/events` returns **upcoming events only**, 20 at a time, with
+the full match count in the `X-Total-Count` header so truncation is never
+silent.
+
+| Parameter | Meaning |
+| --- | --- |
+| `?limit=` | page size, default 20, clamped to 100 |
+| `?skip=` | offset; ties break on `_id`, so pages can't repeat or drop a row |
+| `?includePast=true` | include events that have already started |
+| `?q=` | full-text search (ignores the upcoming filter - if you searched for it, you want it found) |
+
+Only the bare default view is cached; any parameterised request bypasses the
+cache, so the key space can't be inflated by varying `skip`.
+
 ## Tests
 
 Integration tests run against the real stack through the gateway - no mocks, no
@@ -39,11 +55,20 @@ No dependencies to install - `node:test` and `fetch` are built in.
 | `tests/payment.test.js` | Rejected payments free the seat; idempotency keys can't be charged twice. |
 | `tests/recovery.test.js` | Ambiguous payment outcomes stay pending, and the sweep confirms or cancels them from the payment record. Stops the payment container, so tests run serially. |
 | `tests/resilience.test.js` | Services survive their dependencies restarting: notifications reports degraded during a broker outage and reconnects in-process. Restarts shared containers. |
+| `tests/listing.test.js` | Event listing: upcoming-only by default, visible truncation, stable paging, clamped parameters. |
 | `tests/outbox.test.js` | The transactional outbox: events survive a broker outage and are relayed on reconnect; cancelled bookings emit nothing. Stops RabbitMQ. |
 | `tests/idempotency.test.js` | A redelivered `booking.confirmed` does not send a second email. |
 | `tests/caching.test.js` | Catalog's cache-aside layer: hits, invalidation on write, TTL expiry, and that a dead cache degrades to Mongo instead of failing. |
 | `tests/throttling.test.js` | The gateway rate limiter trips, its window rolls over, and `/health` is never throttled. |
 | `tests/shutdown.test.js` | Every service drains on SIGTERM (exit 0, not 137), the aggregate health endpoint returns 503 when a dependency is down, and a Redis outage fails holds fast and closed. Stops the whole app tier. |
+
+## CI
+
+`.github/workflows/ci.yml` runs the whole suite on every push to `main` and on
+pull requests: build the stack with the test overlay, wait for aggregate health,
+`npm test`, dump service logs if anything failed, tear down. It needs no secrets
+and no external services. A run takes roughly 3 minutes of test time on top of
+the image build.
 
 ## Load tests
 

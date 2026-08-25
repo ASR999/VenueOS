@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push supersedes the first: these runs build five images, and there is
+# no value in finishing a run for a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the version the suite is developed against. `node --test`
+          # only expands glob patterns from v21, and the test script uses one.
+          node-version: '24'
+
+      - name: Build and start the stack
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
+
+      # The suite has its own wait, but failing here gives a far clearer signal
+      # than 29 tests timing out one after another.
+      - name: Wait for the stack to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fs http://localhost:8080/health > /dev/null 2>&1; then
+              echo "stack ready after ${i} attempt(s)"
+              curl -sS http://localhost:8080/health
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "stack never became healthy"
+          curl -sS http://localhost:8080/health || true
+          exit 1
+
+      - name: Run tests
+        run: npm test
+
+      # Without this a red build tells you nothing: the tests stop containers on
+      # purpose, so the interesting evidence is in the service logs.
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml down -v

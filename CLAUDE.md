@@ -62,6 +62,9 @@ cd client && npm install && npm run dev   # React app on :5173
 - Events are published through the outbox, never directly from a request
   handler. If you find yourself calling `channel.sendToQueue` outside the relay,
   the write and the publish are no longer atomic and the pattern is defeated.
+- Collection endpoints paginate and report the true total (`X-Total-Count`).
+  Returning a truncated list with a 200 and no indication is how a real event
+  went missing from the UI - found by clicking through it, not by a test.
 - Every service exposes `GET /health` reporting its own dependencies. Health
   must be derived from live state (e.g. `channel !== null`), never a flag set
   once at startup - a health check that cannot go from ok back to degraded is

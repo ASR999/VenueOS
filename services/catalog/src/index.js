@@ -7,6 +7,12 @@ const PORT = process.env.PORT || 4001;
 // SIGKILLed mid-drain and the whole exercise is pointless.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '8000', 10);
 const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '30', 10);
+const DEFAULT_LIMIT = parseInt(process.env.DEFAULT_LIMIT || '20', 10);
+const MAX_LIMIT = parseInt(process.env.MAX_LIMIT || '100', 10);
+// Undated events sort after every dated one instead of before them. Mongo puts
+// null first on an ascending sort, which parked "date TBA" events at the top of
+// the listing - the opposite of useful.
+const NO_DATE_SORTS_LAST = new Date(8640000000000000);
 
 let server = null;
 let shuttingDown = false;
@@ -87,6 +93,38 @@ async function cached(key, res, load) {
   return res.type('json').send(body);
 }
 
+// Like cached(), but the total is cached WITH the body. Setting X-Total-Count
+// only on the load path would make the header appear on a MISS and vanish on a
+// HIT - a response that changes shape depending on cache state is worse than no
+// header at all. The stored envelope keeps the wire format an array.
+async function cachedListing(key, res, load) {
+  try {
+    const hit = await cache.get(key);
+    if (hit !== null) {
+      const { total, events } = JSON.parse(hit);
+      res.set('X-Cache', 'HIT');
+      res.set('X-Total-Count', String(total));
+      return res.json(events);
+    }
+  } catch (err) {
+    console.error('catalog: cache read failed, serving from mongo:', err.message);
+    const [events, total] = await load();
+    res.set('X-Cache', 'BYPASS');
+    res.set('X-Total-Count', String(total));
+    return res.json(events);
+  }
+
+  const [events, total] = await load();
+  res.set('X-Cache', 'MISS');
+  res.set('X-Total-Count', String(total));
+  try {
+    await cache.set(key, JSON.stringify({ total, events }), { EX: CACHE_TTL_SECONDS });
+  } catch (err) {
+    console.error('catalog: cache write failed:', err.message);
+  }
+  return res.json(events);
+}
+
 async function invalidate(...keys) {
   try {
     await cache.del(keys);
@@ -96,12 +134,45 @@ async function invalidate(...keys) {
   }
 }
 
+// The listing was `.sort({ startsAt: 1 }).limit(50)` with no date filter, which
+// fails three ways as the catalogue grows: past events crowd out upcoming ones,
+// undated events sort to the very top, and anything past the 50th is dropped
+// with a 200 and no indication that it happened.
+function listEvents({ limit, skip, includePast }) {
+  const match = includePast ? {} : { $or: [{ startsAt: { $gte: new Date() } }, { startsAt: null }] };
+  return Promise.all([
+    Event.aggregate([
+      { $match: match },
+      { $addFields: { sortAt: { $ifNull: ['$startsAt', NO_DATE_SORTS_LAST] } } },
+      { $sort: { sortAt: 1, _id: 1 } }, // _id breaks ties, so paging can't repeat or skip a row
+      { $skip: skip },
+      { $limit: limit },
+      { $unset: 'sortAt' },
+    ]),
+    Event.countDocuments(match),
+  ]);
+}
+
 app.get(
   '/events',
   ah(async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const skip = Math.max(parseInt(req.query.skip, 10) || 0, 0);
+    const includePast = req.query.includePast === 'true';
+
     if (!q) {
-      return cached('events:list', res, () => Event.find().sort({ startsAt: 1 }).limit(50));
+      // Only the default view is cached. Caching per-parameter would let anyone
+      // fill Redis with keys just by varying skip - the same reasoning that
+      // keeps search results uncached.
+      const isDefaultView = limit === DEFAULT_LIMIT && skip === 0 && !includePast;
+      if (!isDefaultView) {
+        const [events, total] = await listEvents({ limit, skip, includePast });
+        res.set('X-Cache', 'BYPASS');
+        res.set('X-Total-Count', String(total));
+        return res.json(events);
+      }
+      return cachedListing('events:list', res, () => listEvents({ limit, skip, includePast }));
     }
     // Search results are deliberately NOT cached. The cache key would include
     // the query string, so anyone could fill Redis with junk keys just by
@@ -113,7 +184,9 @@ app.get(
       { score: { $meta: 'textScore' } }
     )
       .sort({ score: { $meta: 'textScore' } })
-      .limit(50);
+      .limit(limit);
+    // Search deliberately ignores the upcoming filter: if you searched for it by
+    // name, you want it found whether or not it has already happened.
     res.json(results);
   })
 );
