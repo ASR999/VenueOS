@@ -1,6 +1,6 @@
 # VenueOS
 
-Event ticket booking platform built
+Event ticket booking platform 
 
 ## Quick start
 
