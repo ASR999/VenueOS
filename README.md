@@ -1,7 +1,6 @@
 # VenueOS
 
-Event ticket booking platform built as a microservices learning project
-(system design + DevOps, entirely free to run).
+Event ticket booking platform built
 
 ## Quick start
 
@@ -134,11 +133,9 @@ node loadtest/verify.js <id>                # asserts no seat was oversold
 `verify.js` is the assertion that matters - it reads Postgres directly and fails
 if any seat ever ended up with two active bookings.
 
-Last run: 2,155 checkout attempts, 20 seats, **20 confirmed, 0 oversold**,
-p95 request latency 6.6ms.
 
 > On Windows, run the `docker compose ... run` line from PowerShell, or prefix it
 > with `MSYS_NO_PATHCONV=1` in Git Bash - otherwise `/scripts/flash-sale.js` is
 > rewritten to a Windows path before Docker sees it.
 
-See [CLAUDE.md](./CLAUDE.md) for architecture, conventions, and the roadmap.
+
